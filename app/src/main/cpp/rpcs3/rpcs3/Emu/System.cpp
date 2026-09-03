@@ -1682,7 +1682,7 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 		sys_log.notice("Serial: %s", GetTitleID());
 		sys_log.notice("Category: %s", GetCat());
 		sys_log.notice("Version: APP_VER=%s VERSION=%s", version_app, version_disc);
-		gamedeck_trace::emit("boot_title_resolved", "title_id=%s\tcategory=%s\tapp_ver=%s\tdisc_ver=%s", m_title_id.c_str(), m_cat.c_str(), version_app.c_str(), version_disc.c_str());
+		gamedeck_trace::emit("boot_title_resolved", "title_id=%s\tcategory=%s\tapp_ver=%.*s\tdisc_ver=%.*s", m_title_id.c_str(), m_cat.c_str(), static_cast<int>(version_app.size()), version_app.data(), static_cast<int>(version_disc.size()), version_disc.data());
 
 		{
 			if (m_config_mode == cfg_mode::database_config || m_config_mode == cfg_mode::custom)
