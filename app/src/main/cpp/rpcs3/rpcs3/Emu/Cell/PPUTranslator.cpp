@@ -1,6 +1,7 @@
 #ifdef LLVM_AVAILABLE
 
 #include "Emu/system_config.h"
+#include "Emu/GameDeckTrace.h"
 #include "Emu/Cell/Common.h"
 #include "Emu/Cell/lv2/sys_sync.h"
 #include "PPUTranslator.h"
@@ -3041,6 +3042,12 @@ void PPUTranslator::MULHW(ppu_opcode_t op)
 
 void PPUTranslator::LDARX(ppu_opcode_t op)
 {
+#if defined(__ANDROID__)
+	if (!m_reloc && m_addr == 0x023d1744u)
+	{
+		gamedeck_trace::emit("waveplayer_ldarx_compile", "addr=0x%08llx\tglobal_reservation_mode=%d", static_cast<unsigned long long>(m_addr), static_cast<int>(g_cfg.core.ppu_128_reservations_loop_max_length.get()));
+	}
+#endif
 	if (g_cfg.core.ppu_128_reservations_loop_max_length)
 	{
 		RegStore(Trunc(GetAddr()), m_cia);

@@ -15,6 +15,7 @@
 #include "Emu/system_progress.hpp"
 #include "Emu/system_utils.hpp"
 #include "Emu/System.h"
+#include "Emu/GameDeckTrace.h"
 #include "PPUThread.h"
 #include "PPUInterpreter.h"
 #include "PPUAnalyser.h"
@@ -3029,6 +3030,18 @@ static T ppu_load_acquire_reservation(ppu_thread& ppu, u32 addr)
 {
 	perf_meter<"LARX"_u32> perf0;
 
+#if defined(__ANDROID__)
+	if (ppu.cia == 0x023d1744u)
+	{
+		static thread_local u64 gd_wave_larx_count = 0;
+		const u64 gd_count = ++gd_wave_larx_count;
+		if (gd_count <= 8 || (gd_count & 0x3fffu) == 0)
+		{
+			gamedeck_trace::emit("waveplayer_ldarx_runtime", "count=%llu\tppu=0x%08x\tcia=0x%08x\taddr=0x%08x\tfull_rdata=%u", static_cast<unsigned long long>(gd_count), ppu.id, ppu.cia, addr, ppu.use_full_rdata ? 1u : 0u);
+		}
+	}
+#endif
+
 	// Do not allow stores accessed from the same cache line to past reservation load
 	atomic_fence_seq_cst();
 
@@ -4489,6 +4502,7 @@ extern void ppu_initialize()
 bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_size)
 {
 	ppu_log.notice("Entering ppu_initialize(const ppu_module&..)");
+	gamedeck_trace::emit("ppu_initialize_begin", "path=%s\tcheck_only=%u\tfunctions=%llu\tfile_size=%llu", info.path.c_str(), check_only ? 1u : 0u, static_cast<unsigned long long>(info.get_funcs().size()), static_cast<unsigned long long>(file_size));
 
 	struct log_guard
 	{
@@ -5571,6 +5585,7 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 		g_progr_pdone++;
 	}
 
+	gamedeck_trace::emit("ppu_initialize_end", "path=%s\tcompiled_new=%u\tmodules=%llu", info.path.c_str(), compiled_new ? 1u : 0u, static_cast<unsigned long long>(module_counter));
 	return compiled_new;
 #else
 	fmt::throw_exception("LLVM is not available in this build.");

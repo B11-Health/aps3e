@@ -3,6 +3,7 @@
 #include "nv47_sync.hpp"
 
 #include "Emu/RSX/RSXThread.h"
+#include "Emu/GameDeckTrace.h"
 
 #include "context_accessors.define.h"
 
@@ -24,6 +25,18 @@ namespace rsx
 		{
 			RSX(ctx)->sync_point_request.release(true);
 			const u32 addr = get_address(REGS(ctx)->semaphore_offset_406e(), REGS(ctx)->semaphore_context_dma_406e());
+
+#if defined(__ANDROID__)
+			if (addr == RSX(ctx)->label_addr + 0x480)
+			{
+				static thread_local u64 gd_label72_acquire_count = 0;
+				const u64 gd_n = ++gd_label72_acquire_count;
+				if (gd_n <= 32 || (gd_n & 0xffu) == 0)
+				{
+					gamedeck_trace::emit("label72_acquire", "count=%llu\targ=%u\tcurrent=%u\tget=0x%08x\tput=0x%08x", static_cast<unsigned long long>(gd_n), arg, vm::read32(addr), RSX(ctx)->ctrl ? +RSX(ctx)->ctrl->get : 0u, RSX(ctx)->ctrl ? +RSX(ctx)->ctrl->put : 0u);
+				}
+			}
+#endif
 
 			// Syncronization point, may be associated with memory changes without actually changing addresses
 			RSX(ctx)->m_graphics_state |= rsx::pipeline_state::fragment_program_needs_rehash;
@@ -107,6 +120,18 @@ namespace rsx
 			}
 
 			const u32 addr = get_address(offset, ctxt);
+
+#if defined(__ANDROID__)
+			if (addr == RSX(ctx)->label_addr + 0x480)
+			{
+				static thread_local u64 gd_label72_release_count = 0;
+				const u64 gd_n = ++gd_label72_release_count;
+				if (gd_n <= 32 || (gd_n & 0xffu) == 0)
+				{
+					gamedeck_trace::emit("label72_release", "count=%llu\targ=%u\tcurrent=%u\toffset=0x%x\tctxt=0x%x\tget=0x%08x\tput=0x%08x", static_cast<unsigned long long>(gd_n), arg, vm::read32(addr), offset, ctxt, RSX(ctx)->ctrl ? +RSX(ctx)->ctrl->get : 0u, RSX(ctx)->ctrl ? +RSX(ctx)->ctrl->put : 0u);
+				}
+			}
+#endif
 
 			// TODO: Check if possible to write on reservations
 			if (RSX(ctx)->label_addr >> 28 != addr >> 28)

@@ -7,6 +7,7 @@ add_library(rpcs3_emu STATIC
     scoped_progress_dialog.cpp
     stb_image.cpp
     System.cpp
+    GameDeckTrace.cpp
     system_config.cpp
     system_config_types.cpp
     system_progress.cpp

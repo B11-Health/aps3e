@@ -8,6 +8,7 @@
 
 #include "util/asm.hpp"
 #include "Emu/System.h"
+#include "Emu/GameDeckTrace.h"
 #include "Emu/system_config.h"
 #include "sys_event.h"
 #include "sys_process.h"
@@ -449,6 +450,13 @@ error_code sys_timer_sleep(ppu_thread& ppu, u32 sleep_time)
 
 error_code sys_timer_usleep(ppu_thread& ppu, u64 sleep_time)
 {
+#if defined(__ANDROID__)
+	const u64 gd_requested_sleep = sleep_time;
+	static thread_local u64 gd_short_sleep_count = 0;
+	const u64 gd_count = gd_requested_sleep <= 100 ? ++gd_short_sleep_count : 0;
+	const bool gd_sample = gd_count && (gd_count <= 8 || (gd_count & 0x3ffu) == 0);
+	const u64 gd_start_ns = gd_sample ? gamedeck_trace::now_ns() : 0;
+#endif
 	ppu.state += cpu_flag::wait;
 
 	sys_timer.trace("sys_timer_usleep(sleep_time=0x%llx)", sleep_time);
@@ -478,6 +486,14 @@ error_code sys_timer_usleep(ppu_thread& ppu, u64 sleep_time)
 	{
 		std::this_thread::yield();
 	}
+#if defined(__ANDROID__)
+	if (gd_sample)
+	{
+		const u64 gd_end_ns = gamedeck_trace::now_ns();
+		const u64 gd_elapsed_ns = gd_end_ns >= gd_start_ns ? gd_end_ns - gd_start_ns : 0;
+		gamedeck_trace::emit("usleep_sample", "count=%llu\tppu=0x%08x\tcia=0x%08x\trequested_us=%llu\telapsed_ns=%llu", static_cast<unsigned long long>(gd_count), ppu.id, ppu.cia, static_cast<unsigned long long>(gd_requested_sleep), static_cast<unsigned long long>(gd_elapsed_ns));
+	}
+#endif
 
 	return CELL_OK;
 }

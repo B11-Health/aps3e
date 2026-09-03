@@ -7,6 +7,7 @@
 #include "Emu/system_utils.hpp"
 #include "Emu/perf_meter.hpp"
 #include "Emu/perf_monitor.hpp"
+#include "Emu/GameDeckTrace.h"
 #include "Emu/vfs_config.h"
 #include "Emu/IPC_config.h"
 #include "Emu/savestate_utils.hpp"
@@ -1097,6 +1098,7 @@ void Emulator::SetContinuousMode(bool continuous_mode)
 
 game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch, usz recursion_count)
 {
+	gamedeck_trace::emit("boot_load_begin", "title_arg=%s\trecursion=%llu\tdisc_patch=%u", title_id.c_str(), static_cast<unsigned long long>(recursion_count), is_disc_patch ? 1u : 0u);
 	if (recursion_count == 0 && m_restrict_emu_state_change)
 	{
 		return game_boot_result::currently_restricted;
@@ -1680,6 +1682,7 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 		sys_log.notice("Serial: %s", GetTitleID());
 		sys_log.notice("Category: %s", GetCat());
 		sys_log.notice("Version: APP_VER=%s VERSION=%s", version_app, version_disc);
+		gamedeck_trace::emit("boot_title_resolved", "title_id=%s\tcategory=%s\tapp_ver=%s\tdisc_ver=%s", m_title_id.c_str(), m_cat.c_str(), version_app.c_str(), version_disc.c_str());
 
 		{
 			if (m_config_mode == cfg_mode::database_config || m_config_mode == cfg_mode::custom)
@@ -2530,6 +2533,7 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 		}
 
 		m_state = system_state::ready;
+		gamedeck_trace::emit("boot_state_ready", "path=%s\ttitle_id=%s", m_path.c_str(), m_title_id.c_str());
 
 		ppu_prx_object ppu_prx;
 		ppu_rel_object ppu_rel;
@@ -2665,8 +2669,10 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 
 			const auto _main = ensure(g_fxo->init<main_ppu_module<lv2_obj>>());
 
+			gamedeck_trace::emit("ppu_exec_load_begin", "path=%s", m_path.c_str());
 			if (ppu_load_exec(ppu_exec, false, m_path, DeserialManager()))
 			{
+				gamedeck_trace::emit("ppu_exec_load_ok", "path=%s", m_path.c_str());
 				if (g_cfg.core.ppu_debug && had_been_decrypted)
 				{
 					// Auto-dump decrypted binaries if PPU debug is enabled

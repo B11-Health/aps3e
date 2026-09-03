@@ -2,6 +2,7 @@
 #include "SPURecompiler.h"
 
 #include "Emu/System.h"
+#include "Emu/GameDeckTrace.h"
 #include "Emu/system_config.h"
 #include "Emu/system_progress.hpp"
 #include "Emu/system_utils.hpp"
@@ -839,6 +840,7 @@ void spu_cache::add(const spu_program& func)
 void spu_cache::initialize(bool build_existing_cache)
 {
 	jit_write_guard jit_guard;
+	gamedeck_trace::emit("spu_cache_begin", "build_existing=%u\tdecoder=%s\tblock_size=%s\tcache_enabled=%u\tllvm_precompile=%u", build_existing_cache ? 1u : 0u, g_cfg.core.spu_decoder.to_string().c_str(), g_cfg.core.spu_block_size.to_string().c_str(), g_cfg.core.spu_cache ? 1u : 0u, g_cfg.core.llvm_precompilation ? 1u : 0u);
 
 	spu_runtime::g_interpreter = spu_runtime::g_gateway;
 
@@ -880,6 +882,7 @@ void spu_cache::initialize(bool build_existing_cache)
 
 	// Read cache
 	auto func_list = cache.get();
+	gamedeck_trace::emit("spu_cache_read", "path=%s\tfunctions=%llu", loc.c_str(), static_cast<unsigned long long>(func_list.size()));
 	atomic_t<usz> fnext{};
 	atomic_t<u8> fail_flag{0};
 
@@ -951,6 +954,8 @@ void spu_cache::initialize(bool build_existing_cache)
 
 		worker_count = std::min<u32>(rpcs3::utils::get_max_threads(), ::narrow<u32>(add_count));
 	}
+
+	gamedeck_trace::emit("spu_cache_plan", "functions=%llu\tprecompile=%llu\tworkers=%u\tprecompile_enabled=%u", static_cast<unsigned long long>(func_list.size()), static_cast<unsigned long long>(total_precompile), worker_count, spu_precompilation_enabled ? 1u : 0u);
 
 	atomic_t<u32> pending_progress = 0;
 	atomic_t<bool> showing_progress = false;
@@ -1316,6 +1321,7 @@ void spu_cache::initialize(bool build_existing_cache)
 	}
 
 	spu_log.notice("SPU Runtime: Workers built %u programs.", built_total);
+	gamedeck_trace::emit("spu_cache_workers_done", "built_total=%u\tfail=%u", built_total, fail_flag ? 1u : 0u);
 
 	if (Emu.IsStopped())
 	{
@@ -1339,6 +1345,7 @@ void spu_cache::initialize(bool build_existing_cache)
 	{
 		g_fxo->get<spu_cache>() = std::move(cache);
 	}
+	gamedeck_trace::emit("spu_cache_end", "built_total=%u\tfunctions=%llu", built_total, static_cast<unsigned long long>(func_list.size()));
 }
 
 bool spu_program::operator==(const spu_program& rhs) const noexcept

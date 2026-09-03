@@ -15,6 +15,7 @@
 #include "RSXDisAsm.h"
 
 #include "Emu/System.h"
+#include "Emu/GameDeckTrace.h"
 #include "Emu/Cell/PPUThread.h"
 #include "Emu/Cell/timers.hpp"
 #include "Emu/Cell/lv2/sys_event.h"
@@ -1146,6 +1147,24 @@ namespace rsx
 			// If something is going on in the backend that requires an update, set the interrupt bit explicitly.
 			if ((m_cycles_counter++ & 63) == 0 || m_eng_interrupt_mask)
 			{
+#if defined(__ANDROID__)
+				if ((m_cycles_counter & 0x3fffu) == 0)
+				{
+					static thread_local u64 gd_last_heartbeat_ns = 0;
+					const u64 gd_now_ns = gamedeck_trace::now_ns();
+					if (!gd_last_heartbeat_ns || gd_now_ns - gd_last_heartbeat_ns >= 250000000ull)
+					{
+						gd_last_heartbeat_ns = gd_now_ns;
+						u32 gd_selector = umax;
+						u32 gd_target = umax;
+						u32 gd_label72 = umax;
+						if (vm::check_addr<4>(0x01e76c18)) gd_selector = vm::read32(0x01e76c18) & 0xffu;
+						if (vm::check_addr<4>(0x01bc26d0)) gd_target = vm::read32(0x01bc26d0);
+						if (label_addr && vm::check_addr<4>(label_addr + 0x480)) gd_label72 = vm::read32(label_addr + 0x480);
+						gamedeck_trace::emit("rsx_heartbeat", "get=0x%08x\tput=0x%08x\tfifo_get=0x%08x\tstate=%u\tcycles=%llu\tselector=%u\ttarget=%u\tlabel72=%u", ctrl ? +ctrl->get : 0u, ctrl ? +ctrl->put : 0u, fifo_ctrl ? fifo_ctrl->get_pos() : 0u, static_cast<unsigned>(performance_counters.state), static_cast<unsigned long long>(m_cycles_counter), gd_selector, gd_target, gd_label72);
+					}
+				}
+#endif
 				// Execute backend-local tasks first
 				do_local_task(performance_counters.state);
 
@@ -3298,6 +3317,14 @@ namespace rsx
 
 	bool thread::request_emu_flip(u32 buffer)
 	{
+#if defined(__ANDROID__)
+		static thread_local u64 gd_flip_req_count = 0;
+		const u64 gd_flip_n = ++gd_flip_req_count;
+		if (gd_flip_n <= 8 || (gd_flip_n & 0x3fu) == 0)
+		{
+			gamedeck_trace::emit("flip_request", "count=%llu\tbuffer=%u\tcurrent_thread=%u\tget=0x%08x\tput=0x%08x", static_cast<unsigned long long>(gd_flip_n), buffer, is_current_thread() ? 1u : 0u, ctrl ? +ctrl->get : 0u, ctrl ? +ctrl->put : 0u);
+		}
+#endif
 		if (is_current_thread()) // requested through command buffer
 		{
 			// NOTE: The flip will clear any queued flip requests
@@ -3421,6 +3448,14 @@ namespace rsx
 		last_guest_flip_timestamp = get_system_time() - 1000000;
 		flip_status = CELL_GCM_DISPLAY_FLIP_STATUS_DONE;
 		m_queued_flip.in_progress = false;
+#if defined(__ANDROID__)
+		static thread_local u64 gd_flip_done_count = 0;
+		const u64 gd_flip_done_n = ++gd_flip_done_count;
+		if (gd_flip_done_n <= 8 || (gd_flip_done_n & 0x3fu) == 0)
+		{
+			gamedeck_trace::emit("flip_done", "count=%llu\tbuffer=%u\tget=0x%08x\tput=0x%08x", static_cast<unsigned long long>(gd_flip_done_n), buffer, ctrl ? +ctrl->get : 0u, ctrl ? +ctrl->put : 0u);
+		}
+#endif
 
 		while (flip_notification_count--)
 		{

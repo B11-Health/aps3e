@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "Emu/System.h"
+#include "Emu/GameDeckTrace.h"
 #include "Emu/system_config.h"
 #include "Emu/Audio/audio_utils.h"
 #include "Emu/Cell/PPUModule.h"
@@ -1191,6 +1192,7 @@ void cell_audio_thread::finish_port_volume_stepping()
 error_code cellAudioInit()
 {
 	cellAudio.warning("cellAudioInit()");
+	gamedeck_trace::emit("audio_init_begin");
 
 	auto& g_audio = g_fxo->get<cell_audio>();
 
@@ -1213,6 +1215,7 @@ error_code cellAudioInit()
 	}
 
 	g_audio.init = 1;
+	gamedeck_trace::emit("audio_init_ok");
 
 	return CELL_OK;
 }
@@ -1354,6 +1357,7 @@ error_code cellAudioPortOpen(vm::ptr<CellAudioPortParam> audioParam, vm::ptr<u32
 	}
 
 	*portNum = port->number;
+	gamedeck_trace::emit("audio_port_open_ok", "port=%u\tchannels=%llu\tblocks=%llu\tattr=0x%llx", port->number, static_cast<unsigned long long>(num_channels), static_cast<unsigned long long>(num_blocks), static_cast<unsigned long long>(attr));
 	return CELL_OK;
 }
 
@@ -1405,6 +1409,7 @@ error_code cellAudioGetPortConfig(u32 portNum, vm::ptr<CellAudioPortConfig> port
 error_code cellAudioPortStart(u32 portNum)
 {
 	cellAudio.warning("cellAudioPortStart(portNum=%d)", portNum);
+	gamedeck_trace::emit("audio_port_start_call", "port=%u", portNum);
 
 	auto& g_audio = g_fxo->get<cell_audio>();
 
