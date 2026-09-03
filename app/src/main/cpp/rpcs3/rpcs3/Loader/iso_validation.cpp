@@ -1,7 +1,7 @@
 #include "stdafx.h"
 
 #include "iso_validation.h"
-#include "ISO.h"
+#include "iso.h"
 
 #include "Emu/system_utils.hpp"
 #include "Utilities/File.h"

@@ -1,6 +1,6 @@
 #include "stdafx.h"
 
-#include "ISO.h"
+#include "iso.h"
 #include "Emu/VFS.h"
 #include "Emu/system_utils.hpp"
 #include "Crypto/utils.h"
@@ -36,6 +36,12 @@ static void* get_aligned_buf()
 			// IMPORTANT NOTE: It must be aligned (probably enough on multiple of 4) to support raw device, otherwise any read from file will fail
 #if defined(_WIN32)
 			buf = _aligned_malloc(ISO_SECTOR_SIZE, ISO_SECTOR_SIZE * 2);
+#elif defined(__ANDROID__)
+			buf = nullptr;
+			if (::posix_memalign(&buf, ISO_SECTOR_SIZE * 2, ISO_SECTOR_SIZE) != 0)
+			{
+				buf = nullptr;
+			}
 #else
 			buf = std::aligned_alloc(ISO_SECTOR_SIZE * 2, ISO_SECTOR_SIZE);
 #endif

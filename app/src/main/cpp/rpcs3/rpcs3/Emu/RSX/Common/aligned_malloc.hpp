@@ -22,6 +22,10 @@ namespace rsx
 #elif defined(__APPLE__)
 			constexpr size_t NativeAlign = std::max(Align, sizeof(void*));
 			return std::aligned_alloc(NativeAlign, align_up<NativeAlign>(size));
+#elif defined(__ANDROID__)
+			constexpr size_t NativeAlign = Align < sizeof(void*) ? sizeof(void*) : Align;
+			void* ret = nullptr;
+			return ::posix_memalign(&ret, NativeAlign, align_up<NativeAlign>(size)) == 0 ? ret : nullptr;
 #else
 			return std::aligned_alloc(Align, align_up<Align>(size));
 #endif
@@ -43,6 +47,13 @@ namespace rsx
 #if defined(__APPLE__)
 			constexpr size_t NativeAlign = std::max(Align, sizeof(void*));
 			void* ret = std::aligned_alloc(NativeAlign, align_up<NativeAlign>(new_size));
+#elif defined(__ANDROID__)
+			constexpr size_t NativeAlign = Align < sizeof(void*) ? sizeof(void*) : Align;
+			void* ret = nullptr;
+			if (::posix_memalign(&ret, NativeAlign, align_up<NativeAlign>(new_size)) != 0)
+			{
+				return nullptr;
+			}
 #else
 			void* ret = std::aligned_alloc(Align, align_up<Align>(new_size));
 #endif
