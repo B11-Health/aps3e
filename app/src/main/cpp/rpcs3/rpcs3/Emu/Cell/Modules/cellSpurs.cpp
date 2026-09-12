@@ -4137,6 +4137,14 @@ namespace
 		return !(+pattern._u32[0] | +pattern._u32[1] | +pattern._u32[2] | +pattern._u32[3]);
 	}
 
+	bool spurs_task_pattern_is_bink_canary(const CellSpursTaskLsPattern& pattern)
+	{
+		return +pattern._u32[0] == 0x00000000u &&
+			+pattern._u32[1] == 0x00000040u &&
+			+pattern._u32[2] == 0x00000000u &&
+			+pattern._u32[3] == 0x00000001u;
+	}
+
 	s32 spurs_decode_task_attribute_v1(vm::cptr<CellSpursTaskAttribute> attribute, u32& elf_addr, u32& context_addr, u32& context_size)
 	{
 		const auto& attr = *reinterpret_cast<const spurs_task_attribute_v1*>(attribute.get_ptr());
@@ -4191,6 +4199,13 @@ namespace
 			if (context_size < required_size)
 			{
 				return CELL_SPURS_TASK_ERROR_INVAL;
+			}
+
+			if (spurs_task_pattern_is_bink_canary(attr.ls_pattern) && context_size == 0x1400 && required_size == 0x1400)
+			{
+				cellSpurs.notice("SPURS_CANARY phase=DECODE revision=%u sdk=0x%08x elf=0x%x context=0x%x size=0x%x required=0x%x pattern=%08x:%08x:%08x:%08x",
+					revision, sdk_version, elf_addr, context_addr, context_size, required_size,
+					+attr.ls_pattern._u32[0], +attr.ls_pattern._u32[1], +attr.ls_pattern._u32[2], +attr.ls_pattern._u32[3]);
 			}
 		}
 		else if (context_size || !spurs_task_pattern_is_empty(attr.ls_pattern))
@@ -4307,6 +4322,13 @@ s32 _spurs::create_task(vm::ptr<CellSpursTaskset> taskset, vm::ptr<u32> task_id,
 	if (ls_pattern)
 	{
 		taskset->task_info[tmp_task_id].ls_pattern = *ls_pattern;
+	}
+
+	if (ls_pattern && spurs_task_pattern_is_bink_canary(*ls_pattern) && size == 0x1400 && alloc_ls_blocks == 2)
+	{
+		cellSpurs.notice("SPURS_CANARY phase=CREATE taskset=0x%x task=%u context=0x%x size=0x%x required=0x1400 alloc=%u packed=0x%x pattern=%08x:%08x:%08x:%08x",
+			taskset.addr(), tmp_task_id, context.addr(), size, alloc_ls_blocks, +taskset->task_info[tmp_task_id].context_save_storage_and_alloc_ls_blocks,
+			+ls_pattern->_u32[0], +ls_pattern->_u32[1], +ls_pattern->_u32[2], +ls_pattern->_u32[3]);
 	}
 
 	*task_id = tmp_task_id;

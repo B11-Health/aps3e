@@ -5,12 +5,119 @@
 #include "Emu/Cell/SPUThread.h"
 #include "Emu/Cell/SPURecompiler.h"
 #include "cellSpurs.h"
+#include "Crypto/utils.h"
+
+#include <atomic>
 
 #include "util/asm.hpp"
 #include "util/v128.hpp"
 #include "util/simd.hpp"
 
 LOG_CHANNEL(cellSpurs);
+
+static void spursHalt(spu_thread& spu);
+
+namespace
+{
+	constexpr u64 spurs_canary_context_limit = 0x1'0000'0000ull;
+	constexpr u32 spurs_canary_fixed_offset = 0x000;
+	constexpr u32 spurs_canary_fixed_size = 0x380;
+	constexpr u32 spurs_canary_gap_offset = 0x380;
+	constexpr u32 spurs_canary_gap_size = 0x80;
+	constexpr u32 spurs_canary_payload_offset = 0x400;
+	constexpr u32 spurs_canary_payload_size = 0x800;
+
+	std::atomic<u32> g_spurs_bink_canary_state{0}; // 0=idle, 1=saving, 2=saved, 3=restored
+	std::atomic<u64> g_spurs_bink_canary_taskset{0};
+	std::atomic<u32> g_spurs_bink_canary_task{0};
+	std::atomic<u32> g_spurs_bink_canary_context{0};
+
+	bool spursCanaryIsBinkPattern(const CellSpursTaskLsPattern& pattern)
+	{
+		return +pattern._u32[0] == 0x00000000u &&
+			+pattern._u32[1] == 0x00000040u &&
+			+pattern._u32[2] == 0x00000000u &&
+			+pattern._u32[3] == 0x00000001u;
+	}
+
+	std::string spursCanaryHash(const void* data, usz size)
+	{
+		return sha256_get_hash(static_cast<const char*>(data), size, true);
+	}
+
+	bool spursCanaryCheckContextRange(spu_thread& spu, const char* phase, u64 taskset, u32 task,
+		const CellSpursTaskLsPattern& pattern, u64 context_base, u32 alloc_ls_blocks, u64 capacity,
+		u32 block, u32 slot, u64 offset, u64 length, bool ls_payload, u64 ls_start = 0, u64 ls_end = 0)
+	{
+		const u64 end = offset + length;
+		const u64 guest_end = context_base + end;
+		const bool range_ok = context_base != 0 && context_base <= 0xffffffffull && end >= offset &&
+			end <= capacity && guest_end >= context_base && guest_end <= spurs_canary_context_limit;
+		const bool payload_ok = !ls_payload || (slot < alloc_ls_blocks && offset >= spurs_canary_payload_offset &&
+			ls_end >= ls_start && ls_start >= CELL_SPURS_TASK_TOP && ls_end <= CELL_SPURS_TASK_BOTTOM);
+
+		if (range_ok && payload_ok)
+		{
+			return true;
+		}
+
+		spu_log.error("SPURS_CANARY_FAIL phase=%s reason=range taskset=0x%x task=%u context=0x%x capacity=0x%x alloc=%u pattern=%08x:%08x:%08x:%08x block=%u slot=%u ctx_off=0x%x len=0x%x ctx_end=0x%x ls_start=0x%x ls_end=0x%x",
+			phase, taskset, task, context_base, capacity, alloc_ls_blocks,
+			+pattern._u32[0], +pattern._u32[1], +pattern._u32[2], +pattern._u32[3],
+			block, slot, offset, length, end, ls_start, ls_end);
+		spursHalt(spu);
+		return false;
+	}
+
+	bool spursCanaryCheckBinkMapping(spu_thread& spu, const char* phase, u64 taskset, u32 task,
+		const CellSpursTaskLsPattern& pattern, u64 context_base, u32 alloc_ls_blocks, u64 capacity,
+		u32 block, u32 slot, u64 ctx_off, u64 ctx_end, u64 ls_start, u64 ls_end)
+	{
+		const bool slot0 = slot == 0 && block == 57 && ctx_off == 0x400 && ctx_end == 0xc00 &&
+			ls_start == 0x1c800 && ls_end == 0x1d000;
+		const bool slot1 = slot == 1 && block == 127 && ctx_off == 0xc00 && ctx_end == 0x1400 &&
+			ls_start == 0x3f800 && ls_end == 0x40000;
+		const bool sparse_offset = ctx_off == 0x19c00 || ctx_off == 0x3cc00;
+
+		if ((slot0 || slot1) && !sparse_offset && ctx_off < 0x1400 && ctx_end <= 0x1400)
+		{
+			return true;
+		}
+
+		spu_log.error("SPURS_CANARY_FAIL phase=%s reason=bink_mapping taskset=0x%x task=%u context=0x%x capacity=0x%x alloc=%u pattern=%08x:%08x:%08x:%08x block=%u slot=%u ctx_off=0x%x ctx_end=0x%x ls_start=0x%x ls_end=0x%x",
+			phase, taskset, task, context_base, capacity, alloc_ls_blocks,
+			+pattern._u32[0], +pattern._u32[1], +pattern._u32[2], +pattern._u32[3],
+			block, slot, ctx_off, ctx_end, ls_start, ls_end);
+		spursHalt(spu);
+		return false;
+	}
+
+	bool spursCanaryClaimBinkSave(u64 taskset, u32 task, u32 context_base)
+	{
+		u32 expected = 0;
+		if (!g_spurs_bink_canary_state.compare_exchange_strong(expected, 1, std::memory_order_acq_rel))
+		{
+			return false;
+		}
+
+		g_spurs_bink_canary_taskset.store(taskset, std::memory_order_relaxed);
+		g_spurs_bink_canary_task.store(task, std::memory_order_relaxed);
+		g_spurs_bink_canary_context.store(context_base, std::memory_order_relaxed);
+		return true;
+	}
+
+	bool spursCanaryMatchesSavedBink(u64 taskset, u32 task, u32 context_base)
+	{
+		if (g_spurs_bink_canary_state.load(std::memory_order_acquire) != 2)
+		{
+			return false;
+		}
+
+		return g_spurs_bink_canary_taskset.load(std::memory_order_relaxed) == taskset &&
+			g_spurs_bink_canary_task.load(std::memory_order_relaxed) == task &&
+			g_spurs_bink_canary_context.load(std::memory_order_relaxed) == context_base;
+	}
+}
 
 // Temporarily
 #ifndef _MSC_VER
@@ -1718,8 +1825,39 @@ s32 spursTasketSaveTaskContext(spu_thread& spu)
 	ctxt->savedSpuWriteEventMask = static_cast<u32>(spu.get_ch_value(SPU_RdEventMask));
 	ctxt->savedWriteTagGroupQueryMask = static_cast<u32>(spu.get_ch_value(MFC_RdTagMask));
 
-	// Store the processor context
-	const u32 contextSaveStorage = vm::cast(taskInfo->context_save_storage_and_alloc_ls_blocks & -0x80);
+	// Store the processor context. Temporary canary checks derive legal capacity only from TaskInfo.
+	const u64 packedContext = +taskInfo->context_save_storage_and_alloc_ls_blocks;
+	const u64 contextBase = packedContext & -0x80ull;
+	const u64 contextCapacity = 0x400ull + static_cast<u64>(allocLsBlocks) * 0x800ull;
+	const u64 tasksetAddr = ctxt->taskset.addr();
+	const u32 taskId = +ctxt->taskId;
+	const bool binkDescriptor = spursCanaryIsBinkPattern(taskInfo->ls_pattern) && allocLsBlocks == 2 && contextCapacity == 0x1400;
+
+	if (!spursCanaryCheckContextRange(spu, "SAVE_FIXED", tasksetAddr, taskId, taskInfo->ls_pattern,
+		contextBase, allocLsBlocks, contextCapacity, 0xffffffffu, 0, spurs_canary_fixed_offset, spurs_canary_fixed_size, false))
+	{
+		return CELL_SPURS_TASK_ERROR_STAT;
+	}
+
+	const u32 contextSaveStorage = vm::cast(contextBase);
+	const bool binkCanary = binkDescriptor && spursCanaryClaimBinkSave(tasksetAddr, taskId, contextSaveStorage);
+	if (binkCanary)
+	{
+		spu_log.notice("SPURS_CANARY phase=SAVE_BEGIN taskset=0x%x task=%u context=0x%x capacity=0x%x alloc=%u pattern=%08x:%08x:%08x:%08x popcount=%u fixed_off=0x0 fixed_len=0x380 fixed_end=0x380 gap=0x380..0x3ff",
+			tasksetAddr, taskId, contextBase, contextCapacity, allocLsBlocks,
+			+taskInfo->ls_pattern._u32[0], +taskInfo->ls_pattern._u32[1], +taskInfo->ls_pattern._u32[2], +taskInfo->ls_pattern._u32[3], lsBlocks);
+	}
+	std::string gapHashBefore;
+	if (binkCanary)
+	{
+		if (!spursCanaryCheckContextRange(spu, "SAVE_GAP_BEFORE", tasksetAddr, taskId, taskInfo->ls_pattern,
+			contextBase, allocLsBlocks, contextCapacity, 0xffffffffu, 0, spurs_canary_gap_offset, spurs_canary_gap_size, false))
+		{
+			return CELL_SPURS_TASK_ERROR_STAT;
+		}
+		gapHashBefore = spursCanaryHash(vm::base(contextSaveStorage + spurs_canary_gap_offset), spurs_canary_gap_size);
+	}
+
 	std::memcpy(vm::base(contextSaveStorage), spu._ptr<void>(0x2C80), 0x380);
 
 	// Save selected LS blocks into compact ordinal slots after the processor context.
@@ -1728,10 +1866,80 @@ s32 spursTasketSaveTaskContext(spu_thread& spu)
 	{
 		if (ls_pattern._u & (u128{1} << (i ^ 127)))
 		{
+			const u64 ctxOff = 0x400ull + (static_cast<u64>(slot) << 11);
+			const u64 ctxEnd = ctxOff + 0x800ull;
+			const u64 lsStart = CELL_SPURS_TASK_TOP + (static_cast<u64>(i - 6) << 11);
+			const u64 lsEnd = lsStart + 0x800ull;
+
+			if (!spursCanaryCheckContextRange(spu, "SAVE_COPY", tasksetAddr, taskId, taskInfo->ls_pattern,
+				contextBase, allocLsBlocks, contextCapacity, i, slot, ctxOff, spurs_canary_payload_size, true, lsStart, lsEnd))
+			{
+				return CELL_SPURS_TASK_ERROR_STAT;
+			}
+
+			if (binkCanary && !spursCanaryCheckBinkMapping(spu, "SAVE_COPY", tasksetAddr, taskId, taskInfo->ls_pattern,
+				contextBase, allocLsBlocks, contextCapacity, i, slot, ctxOff, ctxEnd, lsStart, lsEnd))
+			{
+				return CELL_SPURS_TASK_ERROR_STAT;
+			}
+
+			std::string lsHashBefore;
+			if (binkCanary)
+			{
+				lsHashBefore = spursCanaryHash(spu._ptr<void>(static_cast<u32>(lsStart)), spurs_canary_payload_size);
+			}
+
 			// TODO: Combine DMA requests for consecutive blocks into a single request
 			std::memcpy(vm::base(contextSaveStorage + 0x400 + (slot << 11)), spu._ptr<void>(CELL_SPURS_TASK_TOP + ((i - 6) << 11)), 0x800);
+
+			if (binkCanary)
+			{
+				const std::string contextHashAfter = spursCanaryHash(vm::base(contextSaveStorage + static_cast<u32>(ctxOff)), spurs_canary_payload_size);
+				const bool equal = lsHashBefore == contextHashAfter;
+				spu_log.notice("SPURS_CANARY phase=SAVE_COPY taskset=0x%x task=%u context=0x%x capacity=0x%x alloc=%u pattern=%08x:%08x:%08x:%08x block=%u slot=%u ctx_off=0x%x ctx_end=0x%x ls_start=0x%x ls_end=0x%x src_sha256=%s dst_sha256=%s equal=%d",
+					tasksetAddr, taskId, contextBase, contextCapacity, allocLsBlocks,
+					+taskInfo->ls_pattern._u32[0], +taskInfo->ls_pattern._u32[1], +taskInfo->ls_pattern._u32[2], +taskInfo->ls_pattern._u32[3],
+					i, slot, ctxOff, ctxEnd, lsStart, lsEnd, lsHashBefore.c_str(), contextHashAfter.c_str(), equal);
+				if (!equal)
+				{
+					spu_log.error("SPURS_CANARY_FAIL phase=SAVE_COPY reason=hash_mismatch taskset=0x%x task=%u block=%u slot=%u", tasksetAddr, taskId, i, slot);
+					spursHalt(spu);
+					return CELL_SPURS_TASK_ERROR_STAT;
+				}
+			}
+
 			slot++;
 		}
+	}
+
+	if (slot != lsBlocks || slot > allocLsBlocks)
+	{
+		spu_log.error("SPURS_CANARY_FAIL phase=SAVE_END reason=slot_count taskset=0x%x task=%u context=0x%x capacity=0x%x alloc=%u popcount=%u slot=%u",
+			tasksetAddr, taskId, contextBase, contextCapacity, allocLsBlocks, lsBlocks, slot);
+		spursHalt(spu);
+		return CELL_SPURS_TASK_ERROR_STAT;
+	}
+
+	if (binkCanary)
+	{
+		if (!spursCanaryCheckContextRange(spu, "SAVE_GAP_AFTER", tasksetAddr, taskId, taskInfo->ls_pattern,
+			contextBase, allocLsBlocks, contextCapacity, 0xffffffffu, slot, spurs_canary_gap_offset, spurs_canary_gap_size, false))
+		{
+			return CELL_SPURS_TASK_ERROR_STAT;
+		}
+		const std::string gapHashAfter = spursCanaryHash(vm::base(contextSaveStorage + spurs_canary_gap_offset), spurs_canary_gap_size);
+		const bool gapEqual = gapHashBefore == gapHashAfter;
+		spu_log.notice("SPURS_CANARY phase=SAVE_END taskset=0x%x task=%u context=0x%x capacity=0x%x alloc=%u popcount=%u slot=%u slot_ok=%d spare_start=0x%x spare_end=0x%x gap_before_sha256=%s gap_after_sha256=%s gap_equal=%d",
+			tasksetAddr, taskId, contextBase, contextCapacity, allocLsBlocks, lsBlocks, slot,
+			slot == lsBlocks && slot <= allocLsBlocks, 0x400ull + static_cast<u64>(slot) * 0x800ull, contextCapacity,
+			gapHashBefore.c_str(), gapHashAfter.c_str(), gapEqual);
+		if (!gapEqual)
+		{
+			spu_log.error("SPURS_CANARY_FAIL phase=SAVE_END reason=gap_modified taskset=0x%x task=%u", tasksetAddr, taskId);
+			spursHalt(spu);
+			return CELL_SPURS_TASK_ERROR_STAT;
+		}
+		g_spurs_bink_canary_state.store(2, std::memory_order_release);
 	}
 
 	//spursDmaWaitForCompletion(spu, 1 << ctxt->dmaTagId);
@@ -1830,18 +2038,145 @@ void spursTasksetDispatch(spu_thread& spu)
 			}
 		}
 
-		// Load saved context from main memory to LS
-		const u32 contextSaveStorage = vm::cast(taskInfo->context_save_storage_and_alloc_ls_blocks & -0x80);
+		// Load saved context from main memory to LS. Temporary canary checks derive legal capacity only from TaskInfo.
+		const u64 packedContext = +taskInfo->context_save_storage_and_alloc_ls_blocks;
+		const u32 allocLsBlocks = static_cast<u32>(packedContext & 0x7f);
+		const u32 lsBlocks = utils::popcnt128(ls_pattern._u);
+		const u64 contextBase = packedContext & -0x80ull;
+		const u64 contextCapacity = 0x400ull + static_cast<u64>(allocLsBlocks) * 0x800ull;
+		const u64 tasksetAddr = ctxt->taskset.addr();
+		const bool binkDescriptor = spursCanaryIsBinkPattern(taskInfo->ls_pattern) && allocLsBlocks == 2 && contextCapacity == 0x1400;
+
+		if (!spursCanaryCheckContextRange(spu, "RESTORE_FIXED", tasksetAddr, taskId, taskInfo->ls_pattern,
+			contextBase, allocLsBlocks, contextCapacity, 0xffffffffu, 0, spurs_canary_fixed_offset, spurs_canary_fixed_size, false))
+		{
+			return;
+		}
+
+		const u32 contextSaveStorage = vm::cast(contextBase);
+		const bool binkCanary = binkDescriptor && spursCanaryMatchesSavedBink(tasksetAddr, taskId, contextSaveStorage);
+		std::string gapHashBefore;
+		if (binkCanary)
+		{
+			spu_log.notice("SPURS_CANARY phase=RESTORE_BEGIN taskset=0x%x task=%u context=0x%x capacity=0x%x alloc=%u pattern=%08x:%08x:%08x:%08x popcount=%u isWaiting=%u fixed_off=0x0 fixed_len=0x380 fixed_end=0x380 gap=0x380..0x3ff",
+				tasksetAddr, taskId, contextBase, contextCapacity, allocLsBlocks,
+				+taskInfo->ls_pattern._u32[0], +taskInfo->ls_pattern._u32[1], +taskInfo->ls_pattern._u32[2], +taskInfo->ls_pattern._u32[3], lsBlocks, isWaiting);
+			if (!spursCanaryCheckContextRange(spu, "RESTORE_GAP_BEFORE", tasksetAddr, taskId, taskInfo->ls_pattern,
+				contextBase, allocLsBlocks, contextCapacity, 0xffffffffu, 0, spurs_canary_gap_offset, spurs_canary_gap_size, false))
+			{
+				return;
+			}
+			gapHashBefore = spursCanaryHash(vm::base(contextSaveStorage + spurs_canary_gap_offset), spurs_canary_gap_size);
+		}
+
 		std::memcpy(spu._ptr<void>(0x2C80), vm::base(contextSaveStorage), 0x380);
 		u32 slot = 0;
 		for (auto i = 6; i < 128; i++)
 		{
 			if (ls_pattern._u & (u128{1} << (i ^ 127)))
 			{
+				const u64 ctxOff = 0x400ull + (static_cast<u64>(slot) << 11);
+				const u64 ctxEnd = ctxOff + 0x800ull;
+				const u64 lsStart = CELL_SPURS_TASK_TOP + (static_cast<u64>(i - 6) << 11);
+				const u64 lsEnd = lsStart + 0x800ull;
+
+				if (!spursCanaryCheckContextRange(spu, "RESTORE_COPY", tasksetAddr, taskId, taskInfo->ls_pattern,
+					contextBase, allocLsBlocks, contextCapacity, i, slot, ctxOff, spurs_canary_payload_size, true, lsStart, lsEnd))
+				{
+					return;
+				}
+
+				if (binkCanary && !spursCanaryCheckBinkMapping(spu, "RESTORE_COPY", tasksetAddr, taskId, taskInfo->ls_pattern,
+					contextBase, allocLsBlocks, contextCapacity, i, slot, ctxOff, ctxEnd, lsStart, lsEnd))
+				{
+					return;
+				}
+
+				std::string contextHashBefore;
+				std::string neighborABefore;
+				std::string neighborBBefore;
+				u32 neighborABlock = 0xffffffffu;
+				u32 neighborBBlock = 0xffffffffu;
+				u32 neighborAStart = 0;
+				u32 neighborBStart = 0;
+				if (binkCanary)
+				{
+					contextHashBefore = spursCanaryHash(vm::base(contextSaveStorage + static_cast<u32>(ctxOff)), spurs_canary_payload_size);
+					if (i == 57)
+					{
+						neighborABlock = 56;
+						neighborAStart = 0x1c000;
+						neighborBBlock = 58;
+						neighborBStart = 0x1d000;
+						neighborABefore = spursCanaryHash(spu._ptr<void>(neighborAStart), spurs_canary_payload_size);
+						neighborBBefore = spursCanaryHash(spu._ptr<void>(neighborBStart), spurs_canary_payload_size);
+					}
+					else if (i == 127)
+					{
+						neighborABlock = 126;
+						neighborAStart = 0x3f000;
+						neighborABefore = spursCanaryHash(spu._ptr<void>(neighborAStart), spurs_canary_payload_size);
+					}
+				}
+
 				// TODO: Combine DMA requests for consecutive blocks into a single request
 				std::memcpy(spu._ptr<void>(CELL_SPURS_TASK_TOP + ((i - 6) << 11)), vm::base(contextSaveStorage + 0x400 + (slot << 11)), 0x800);
+
+				if (binkCanary)
+				{
+					const std::string lsHashAfter = spursCanaryHash(spu._ptr<void>(static_cast<u32>(lsStart)), spurs_canary_payload_size);
+					const std::string neighborAAfter = neighborABlock == 0xffffffffu ? std::string{} : spursCanaryHash(spu._ptr<void>(neighborAStart), spurs_canary_payload_size);
+					const std::string neighborBAfter = neighborBBlock == 0xffffffffu ? std::string{} : spursCanaryHash(spu._ptr<void>(neighborBStart), spurs_canary_payload_size);
+					const bool payloadEqual = contextHashBefore == lsHashAfter;
+					const bool neighborAEqual = neighborABlock == 0xffffffffu || neighborABefore == neighborAAfter;
+					const bool neighborBEqual = neighborBBlock == 0xffffffffu || neighborBBefore == neighborBAfter;
+					spu_log.notice("SPURS_CANARY phase=RESTORE_COPY taskset=0x%x task=%u context=0x%x capacity=0x%x alloc=%u pattern=%08x:%08x:%08x:%08x block=%u slot=%u ctx_off=0x%x ctx_end=0x%x ls_start=0x%x ls_end=0x%x src_sha256=%s dst_sha256=%s equal=%d neighbor_a_block=%u neighbor_a_before=%s neighbor_a_after=%s neighbor_a_equal=%d neighbor_b_block=%u neighbor_b_before=%s neighbor_b_after=%s neighbor_b_equal=%d",
+					tasksetAddr, taskId, contextBase, contextCapacity, allocLsBlocks,
+					+taskInfo->ls_pattern._u32[0], +taskInfo->ls_pattern._u32[1], +taskInfo->ls_pattern._u32[2], +taskInfo->ls_pattern._u32[3],
+					i, slot, ctxOff, ctxEnd, lsStart, lsEnd, contextHashBefore.c_str(), lsHashAfter.c_str(), payloadEqual,
+					neighborABlock, neighborABefore.c_str(), neighborAAfter.c_str(), neighborAEqual,
+					neighborBBlock, neighborBBefore.c_str(), neighborBAfter.c_str(), neighborBEqual);
+					if (!payloadEqual || !neighborAEqual || !neighborBEqual)
+					{
+						spu_log.error("SPURS_CANARY_FAIL phase=RESTORE_COPY reason=hash_mismatch taskset=0x%x task=%u block=%u slot=%u payload_equal=%d neighbor_a_equal=%d neighbor_b_equal=%d",
+							tasksetAddr, taskId, i, slot, payloadEqual, neighborAEqual, neighborBEqual);
+						spursHalt(spu);
+						return;
+					}
+				}
+
 				slot++;
 			}
+		}
+
+		if (slot != lsBlocks || slot > allocLsBlocks)
+		{
+			spu_log.error("SPURS_CANARY_FAIL phase=RESTORE_END reason=slot_count taskset=0x%x task=%u context=0x%x capacity=0x%x alloc=%u popcount=%u slot=%u",
+				tasksetAddr, taskId, contextBase, contextCapacity, allocLsBlocks, lsBlocks, slot);
+			spursHalt(spu);
+			return;
+		}
+
+		if (binkCanary)
+		{
+			if (!spursCanaryCheckContextRange(spu, "RESTORE_GAP_AFTER", tasksetAddr, taskId, taskInfo->ls_pattern,
+				contextBase, allocLsBlocks, contextCapacity, 0xffffffffu, slot, spurs_canary_gap_offset, spurs_canary_gap_size, false))
+			{
+				return;
+			}
+			const std::string gapHashAfter = spursCanaryHash(vm::base(contextSaveStorage + spurs_canary_gap_offset), spurs_canary_gap_size);
+			const bool gapEqual = gapHashBefore == gapHashAfter;
+			spu_log.notice("SPURS_CANARY phase=RESTORE_END taskset=0x%x task=%u context=0x%x capacity=0x%x alloc=%u popcount=%u slot=%u slot_ok=%d spare_start=0x%x spare_end=0x%x gap_before_sha256=%s gap_after_sha256=%s gap_equal=%d",
+				tasksetAddr, taskId, contextBase, contextCapacity, allocLsBlocks, lsBlocks, slot,
+				slot == lsBlocks && slot <= allocLsBlocks, 0x400ull + static_cast<u64>(slot) * 0x800ull, contextCapacity,
+				gapHashBefore.c_str(), gapHashAfter.c_str(), gapEqual);
+			if (!gapEqual)
+			{
+				spu_log.error("SPURS_CANARY_FAIL phase=RESTORE_END reason=gap_modified taskset=0x%x task=%u", tasksetAddr, taskId);
+				spursHalt(spu);
+				return;
+			}
+			g_spurs_bink_canary_state.store(3, std::memory_order_release);
 		}
 
 		//spursDmaWaitForCompletion(spu, 1 << ctxt->dmaTagId);
