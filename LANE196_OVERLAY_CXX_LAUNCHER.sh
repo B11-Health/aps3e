@@ -3,9 +3,9 @@ set -euo pipefail
 
 HOME_ROOT="/data/data/com.termux/files/home"
 PREFIX="/data/data/com.termux/files/usr"
-WORKTREE="$HOME_ROOT/projects/android/gamedeck-ps3-prod-lanes-20260912/lane193-prod-spurs-canary-build-wrapper-v2"
-SELF_EXPECTED="$WORKTREE/LANE193_OVERLAY_CXX_LAUNCHER.sh"
-WRAPPER_EXPECTED="$WORKTREE/LANE193_BUILD_WRAPPER.sh"
+WORKTREE="$HOME_ROOT/projects/android/gamedeck-ps3-prod-lanes-20260912/lane196-prod-spurs-canary-build-wrapper-v3"
+SELF_EXPECTED="$WORKTREE/LANE196_OVERLAY_CXX_LAUNCHER.sh"
+WRAPPER_EXPECTED="$WORKTREE/LANE196_BUILD_WRAPPER.sh"
 LANE187_REPO="$HOME_ROOT/projects/android/gamedeck-ps3-prod-lanes-20260912/lane187-prod-spurs-canary-instrumentation"
 LANE187_MOD="$LANE187_REPO/app/src/main/cpp/rpcs3/rpcs3/Emu/Cell/Modules"
 CANON_REPO="$HOME_ROOT/projects/android/gamedeck/mobile/android/vendor/aps3e-source"
@@ -21,16 +21,16 @@ PIN_CELL_SHA="c1c3731fd34823eebd88d87ab5bde00f38147e7e78d68bd93d898440161dd6f4"
 PIN_SPU_SHA="f5ae5b6e8e19884382399f5b76980f5e6e6d253d6b0b94bdfe3dcfbf0a4d6570"
 PIN_CANON_CELL_SHA="fe9fc920ad97d993b8223a3695fc91512928b58310aa39659d7151f53944347b"
 PIN_CANON_SPU_SHA="95e855384ee80ebeadd6c35300f8f093bf4d8345f4cdacca14bad6d08080fcc9"
-TRACE_HEADER=$'#LANE193_OVERLAY_TRACE_V1\tutc_timestamp\ttu\tcandidate_sha256\tcompiler\tcanonical_source\tcandidate_source'
-TRACE="${LANE193_TRACE_PATH:-}"
-APPROVED_COMMIT="${LANE193_APPROVED_COMMIT:-}"
-APPROVED_WRAPPER_SHA="${LANE193_APPROVED_WRAPPER_SHA256:-}"
-APPROVED_LAUNCHER_SHA="${LANE193_APPROVED_LAUNCHER_SHA256:-}"
+TRACE_HEADER=$'#LANE196_OVERLAY_TRACE_V1\tutc_timestamp\ttu\tcandidate_sha256\tcompiler\tcanonical_source\tcandidate_source'
+TRACE="${LANE196_TRACE_PATH:-}"
+APPROVED_COMMIT="${LANE196_APPROVED_COMMIT:-}"
+APPROVED_WRAPPER_SHA="${LANE196_APPROVED_WRAPPER_SHA256:-}"
+APPROVED_LAUNCHER_SHA="${LANE196_APPROVED_LAUNCHER_SHA256:-}"
 
 fail() {
     local rc="$1"
     shift
-    printf 'LANE193_OVERLAY_FAIL rc=%s %s\n' "$rc" "$*" >&2
+    printf 'LANE196_OVERLAY_FAIL rc=%s %s\n' "$rc" "$*" >&2
     exit "$rc"
 }
 
@@ -50,12 +50,12 @@ clean_status_or_fail() {
     [[ -z "$status" ]] || fail 92 "$label worktree is not clean"
 }
 
-[[ "$APPROVED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail 70 "LANE193_APPROVED_COMMIT must be an exact 40-hex commit"
-[[ "$APPROVED_WRAPPER_SHA" =~ ^[0-9a-f]{64}$ ]] || fail 71 "LANE193_APPROVED_WRAPPER_SHA256 must be an exact 64-hex SHA256"
-[[ "$APPROVED_LAUNCHER_SHA" =~ ^[0-9a-f]{64}$ ]] || fail 72 "LANE193_APPROVED_LAUNCHER_SHA256 must be an exact 64-hex SHA256"
-[[ -n "$TRACE" ]] || fail 73 "LANE193_TRACE_PATH is required"
+[[ "$APPROVED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail 70 "LANE196_APPROVED_COMMIT must be an exact 40-hex commit"
+[[ "$APPROVED_WRAPPER_SHA" =~ ^[0-9a-f]{64}$ ]] || fail 71 "LANE196_APPROVED_WRAPPER_SHA256 must be an exact 64-hex SHA256"
+[[ "$APPROVED_LAUNCHER_SHA" =~ ^[0-9a-f]{64}$ ]] || fail 72 "LANE196_APPROVED_LAUNCHER_SHA256 must be an exact 64-hex SHA256"
+[[ -n "$TRACE" ]] || fail 73 "LANE196_TRACE_PATH is required"
 
-TRACE_PREFIX="$HOME_ROOT/.cache/gd-lane193-lane187-canary-libe-${APPROVED_WRAPPER_SHA}-"
+TRACE_PREFIX="$HOME_ROOT/.cache/gd-lane196-lane187-canary-libe-${APPROVED_WRAPPER_SHA}-"
 [[ "$TRACE" == "$TRACE_PREFIX"*"/overlay-trace.tsv" ]] || fail 74 "unexpected trace path: $TRACE"
 RUN_DIR="${TRACE%/overlay-trace.tsv}"
 RUN_SUFFIX="${RUN_DIR#"$TRACE_PREFIX"}"
@@ -131,11 +131,11 @@ if (( sub_count == 1 )); then
     [[ "$self_real" == "$SELF_EXPECTED" ]] || fail 89 "launcher path mismatch: $self_real"
     [[ -f "$WRAPPER_EXPECTED" && ! -L "$WRAPPER_EXPECTED" ]] || fail 90 "wrapper missing or symlinked"
 
-    if ! lane193_head=$("$GIT" -C "$WORKTREE" rev-parse HEAD); then
-        fail 93 "Lane193 rev-parse failed"
+    if ! lane196_head=$("$GIT" -C "$WORKTREE" rev-parse HEAD); then
+        fail 93 "Lane196 rev-parse failed"
     fi
-    [[ "$lane193_head" == "$APPROVED_COMMIT" ]] || fail 94 "Lane193 approved commit mismatch: $lane193_head"
-    clean_status_or_fail "$WORKTREE" "Lane193"
+    [[ "$lane196_head" == "$APPROVED_COMMIT" ]] || fail 94 "Lane196 approved commit mismatch: $lane196_head"
+    clean_status_or_fail "$WORKTREE" "Lane196"
 
     if ! launcher_sha=$(sha_file "$SELF_EXPECTED"); then
         fail 95 "launcher SHA256 failed"
@@ -146,10 +146,10 @@ if (( sub_count == 1 )); then
     [[ "$launcher_sha" == "$APPROVED_LAUNCHER_SHA" ]] || fail 97 "launcher SHA256 differs from approved identity"
     [[ "$wrapper_sha" == "$APPROVED_WRAPPER_SHA" ]] || fail 98 "wrapper SHA256 differs from approved identity"
 
-    if ! approved_launcher_blob=$("$GIT" -C "$WORKTREE" rev-parse "$APPROVED_COMMIT:LANE193_OVERLAY_CXX_LAUNCHER.sh"); then
+    if ! approved_launcher_blob=$("$GIT" -C "$WORKTREE" rev-parse "$APPROVED_COMMIT:LANE196_OVERLAY_CXX_LAUNCHER.sh"); then
         fail 99 "approved launcher blob lookup failed"
     fi
-    if ! approved_wrapper_blob=$("$GIT" -C "$WORKTREE" rev-parse "$APPROVED_COMMIT:LANE193_BUILD_WRAPPER.sh"); then
+    if ! approved_wrapper_blob=$("$GIT" -C "$WORKTREE" rev-parse "$APPROVED_COMMIT:LANE196_BUILD_WRAPPER.sh"); then
         fail 100 "approved wrapper blob lookup failed"
     fi
     if ! runtime_launcher_blob=$("$GIT" hash-object "$SELF_EXPECTED"); then
