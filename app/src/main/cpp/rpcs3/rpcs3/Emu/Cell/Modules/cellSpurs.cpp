@@ -4121,20 +4121,14 @@ namespace
 			return CELL_SPURS_TASK_ERROR_INVAL;
 		}
 
-		size = CELL_SPURS_TASK_EXECUTION_CONTEXT_SIZE;
-
-		// cellSpursSpu.cpp stores block N at 0x400 + ((N - 6) << 11), so a sparse
-		// pattern needs capacity through its highest selected absolute LS block.
-		for (s32 block = 127; block >= 6; block--)
+		u32 saved_blocks = 0;
+		for (const auto& word : pattern._u32)
 		{
-			const u32 bit = 1u << (31 - (block & 31));
-			if (+pattern._u32[block >> 5] & bit)
-			{
-				size += static_cast<u32>(block - 5) * 0x800;
-				break;
-			}
+			saved_blocks += std::popcount(+word);
 		}
 
+		// Selected task LS blocks are packed contiguously after the fixed processor context.
+		size = CELL_SPURS_TASK_EXECUTION_CONTEXT_SIZE + saved_blocks * 0x800;
 		return CELL_OK;
 	}
 

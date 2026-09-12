@@ -1722,13 +1722,15 @@ s32 spursTasketSaveTaskContext(spu_thread& spu)
 	const u32 contextSaveStorage = vm::cast(taskInfo->context_save_storage_and_alloc_ls_blocks & -0x80);
 	std::memcpy(vm::base(contextSaveStorage), spu._ptr<void>(0x2C80), 0x380);
 
-	// Save LS context
+	// Save selected LS blocks into compact ordinal slots after the processor context.
+	u32 slot = 0;
 	for (auto i = 6; i < 128; i++)
 	{
 		if (ls_pattern._u & (u128{1} << (i ^ 127)))
 		{
 			// TODO: Combine DMA requests for consecutive blocks into a single request
-			std::memcpy(vm::base(contextSaveStorage + 0x400 + ((i - 6) << 11)), spu._ptr<void>(CELL_SPURS_TASK_TOP + ((i - 6) << 11)), 0x800);
+			std::memcpy(vm::base(contextSaveStorage + 0x400 + (slot << 11)), spu._ptr<void>(CELL_SPURS_TASK_TOP + ((i - 6) << 11)), 0x800);
+			slot++;
 		}
 	}
 
@@ -1831,12 +1833,14 @@ void spursTasksetDispatch(spu_thread& spu)
 		// Load saved context from main memory to LS
 		const u32 contextSaveStorage = vm::cast(taskInfo->context_save_storage_and_alloc_ls_blocks & -0x80);
 		std::memcpy(spu._ptr<void>(0x2C80), vm::base(contextSaveStorage), 0x380);
+		u32 slot = 0;
 		for (auto i = 6; i < 128; i++)
 		{
 			if (ls_pattern._u & (u128{1} << (i ^ 127)))
 			{
 				// TODO: Combine DMA requests for consecutive blocks into a single request
-				std::memcpy(spu._ptr<void>(CELL_SPURS_TASK_TOP + ((i - 6) << 11)), vm::base(contextSaveStorage + 0x400 + ((i - 6) << 11)), 0x800);
+				std::memcpy(spu._ptr<void>(CELL_SPURS_TASK_TOP + ((i - 6) << 11)), vm::base(contextSaveStorage + 0x400 + (slot << 11)), 0x800);
+				slot++;
 			}
 		}
 

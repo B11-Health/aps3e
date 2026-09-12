@@ -1,111 +1,157 @@
-# Lane 172 — Production aPS3e SPURS task-attribute API bridge
+# Lane 178 — Production SPURS compact context storage correction
 
 Date: 2026-09-12
-Branch: `team/prod-spurs-api`
-Base: `97c8df684c2572b97623c8d0a4d98ce86d40257f`
-Scope: source patch + report only. No build, unit test, GTA probe, APK/NDK job, install, or other heavyweight job was run.
+Branch: `team/prod-spurs-compact-context`
+Starting commit: `4689537cb9b1c79738b6e1f0cadd1843f0c02b40` (Lane172)
+Scope: source patch + report only. No Codex, build, test execution, GTA probe, APK/NDK action, install, merge, or heavyweight job was performed.
 
 ## Result
 
-Implemented the three production `cellSpurs.cpp` exports identified by Lane170 as the genuine Android parity gap, without changing the public opaque `CellSpursTaskAttribute` ABI and without copying clean-room scheduler/TaskInfo/EventFlag logic:
+Implemented the smallest coherent production correction requested by Task178:
 
-1. `cellSpursTaskGetContextSaveAreaSize`
-2. `_cellSpursTaskAttributeInitialize`
-3. `cellSpursCreateTaskWithAttribute`
+1. `cellSpursSpu.cpp` now saves selected task LS blocks into compact ordinal main-memory slots after the fixed `0x400` processor-context area while preserving the absolute LS source address derived from the real selected block number.
+2. The restore path uses the identical ascending-block ordinal traversal, so compact save and restore remain symmetric.
+3. Lane172's `spurs_task_context_save_area_size()` now returns compact capacity: `0x400 + popcount(pattern) * 0x800`, while still rejecting SPURS management blocks 0..5.
+4. The existing Lane172 initializer/decoder capacity checks therefore accept authentic Bink `sizeContext=0x1400` for selected blocks 57+127 and still reject a context smaller than the compact required size.
+5. `cellSpursTaskGetContextSaveAreaSize()` now returns that same compact size because it delegates to the corrected helper.
+6. No TaskInfo layout, stack-coverage rule, popcount-vs-allocated-count validation, scheduler behavior, EventFlag behavior, DMA semantics, task ABI, or Android application code was changed.
 
-`cellSpursCreateTaskWithAttribute` is an adapter only. After decoding/validating the private v1 attribute it delegates to the existing production `_spurs::create_task()` and `_spurs::task_start()` path, so task-id allocation, `TaskInfo` packing, pending-ready publication, workload signaling, reservations, and wake behavior stay owned by existing production code.
+## Exact compact algorithm
 
-## Authority and ABI assumptions
+### Context size
 
-The task-mandated `/data/data/com.termux/files/home/projects/android/TEAM_RESOURCE_POLICY.md` path does not exist on this device. I verified that absence and read the available project policy at `../gamedeck-ps3-live-lanes-20260908/TEAM_RESOURCE_POLICY.md`; this lane remained source-only, so no heavyweight slot was used.
+For a valid task LS pattern:
 
-Lane170 `AGENT_RESULT.md`, local production `cellSpurs.h` / `cellSpursSpu.cpp`, the local Sony-identifying `~/.cache/gd-spurs-ref/task.h`, the GTA 1.06 caller evidence summarized by Lane115, and the local host-native SPURS reference agree on the relevant contract:
+```text
+saved_blocks = popcount(pattern[0..127])
+required_size = 0x400 + saved_blocks * 0x800
+```
 
-- SDK prototype for the size helper is `cellSpursTaskGetContextSaveAreaSize(uint32_t *size, const CellSpursTaskLsPattern *lsPattern)`.
-- SDK prototype for the v1 initializer has six arguments: attribute, revision, SDK version, ELF EA, `CellSpursTaskSaveConfig*`, optional `CellSpursTaskArgument*`.
-- GTA passes `r7` as a 12-byte big-endian save-config descriptor, not as a raw LS pattern:
-  - `+0x00`: context EA (BE32)
-  - `+0x04`: context size (BE32)
-  - `+0x08`: LS-pattern EA (BE32)
-- Proven GTA worker values include context EA `0x104acb00` / `0x104ae000`, size `0x1400`, and LS-pattern EA `0x01e6db10` / `0x01e6db20`; revision is 1, SDK is `0x00330000`, ELF is `0x01bf0f80`, and the optional task argument is null.
-- The private v1 attribute view remains local to `cellSpurs.cpp` and overlays the public opaque 256-byte `CellSpursTaskAttribute`:
-  - `+0x00` revision BE32
-  - `+0x04` SDK version BE32
-  - `+0x08` ELF EA BE64
-  - `+0x10` context EA BE64
-  - `+0x18` context size BE32
-  - `+0x1c` reserved
-  - `+0x20` 16-byte `CellSpursTaskLsPattern`
-  - `+0x30` 16-byte `CellSpursTaskArgument`
-  - `+0x40` exit-code-container EA BE32
-  - remaining bytes reserved
-- Static assertions keep the private view at the same 256-byte size and 16-byte alignment as the public opaque type. `CellSpursTaskAttribute2` was not changed or reused as a v1 layout.
+Before counting, any selected management block in LS blocks 0..5 remains invalid (`CELL_SPURS_TASK_ERROR_INVAL`).
 
-## Context-save geometry
+This yields the Task178 required vectors by inspection:
 
-Production `cellSpursSpu.cpp` saves the fixed processor context first and then LS block `N` at:
+- empty pattern -> `0x400`
+- block 6 only -> `0xc00`
+- blocks 57 + 127 -> `0x1400`
+- any three valid selected blocks, including block 127 -> `0x1c00`
+- any management block 0..5 selected -> `CELL_SPURS_TASK_ERROR_INVAL`
 
-`context + 0x400 + ((N - 6) << 11)`
+The v1 attribute initializer and decoder both continue to require `context_size >= required_size`. Because `required_size` is now compact rather than a highest-block sparse span, they accept the authentic Bink descriptor while still rejecting genuinely undersized compact storage.
 
-for selected blocks `N = 6..127`, with 0x800 bytes per LS block. Therefore the minimum save area is:
+### Save mapping
 
-- empty LS pattern: `0x400`
-- otherwise: `0x400 + (highest_selected_block - 5) * 0x800`
+Save iterates real LS block numbers in ascending order `i = 6..127`. A separate ordinal `slot` starts at zero and increments only when block `i` is selected.
 
-The new helper uses that sparse absolute-span geometry rather than popcount. It rejects management LS blocks 0..5 (`word0 & 0xfc000000`). Examples implied by the implementation are block 6 -> `0x0c00`, block 7 -> `0x1400`, and block 127 -> `0x3d400`.
+For each selected block:
 
-## Validation added
+```text
+LS source      = CELL_SPURS_TASK_TOP + ((i - 6) << 11)
+context target = context + 0x400 + (slot << 11)
+slot++
+```
 
-### `cellSpursTaskGetContextSaveAreaSize`
+Thus the selected LS address remains absolute by real block number, while the main-memory payload is compact.
 
-- null output or LS-pattern pointer -> `CELL_SPURS_TASK_ERROR_NULL_POINTER`
-- misaligned output or 16-byte LS-pattern pointer -> `CELL_SPURS_TASK_ERROR_ALIGN`
-- management blocks 0..5 selected -> `CELL_SPURS_TASK_ERROR_INVAL`
-- writes the sparse-span required size only after validation succeeds
+### Restore mapping
 
-### `_cellSpursTaskAttributeInitialize`
+Restore performs the same ascending selected-block traversal and ordinal slot sequence:
 
-- requires non-null attribute and ELF
-- requires 16-byte attribute/ELF alignment, natural save-config alignment, and 16-byte optional argument alignment
-- requires v1 revision and nonzero SDK version
-- decodes the 12-byte save-config descriptor as context EA / size / LS-pattern EA
-- uses the same SDK alignment split already present in production `_spurs::create_task`: context is 16-byte aligned before SDK `0x27ffff`, otherwise 128-byte aligned
-- when context is present, requires a non-null 16-byte-aligned LS-pattern pointer, minimum 0x400 fixed context, no management blocks, and a declared context size large enough to cover the highest selected sparse LS block
-- when context is absent, rejects nonzero size or LS-pattern EA
-- zeroes the full 256-byte opaque attribute before writing v1 fields, so reserved bytes and the exit-code-container field start at zero
-- copies the actual 16-byte LS pattern, not the 12-byte descriptor
-- copies the optional task argument when supplied; a null argument leaves the zeroed 16-byte argument field intact, matching GTA's observed `r8=0`
+```text
+context source = context + 0x400 + (slot << 11)
+LS target      = CELL_SPURS_TASK_TOP + ((i - 6) << 11)
+slot++
+```
 
-### `cellSpursCreateTaskWithAttribute`
+This is the inverse of save without changing the LS pattern or TaskInfo representation.
 
-- validates taskset, task-id output, and attribute pointers/alignment
-- validates revision, SDK, 32-bit-representable ELF/context EAs, ELF alignment, context alignment/size, management-block exclusion, and sparse-span capacity from the private v1 attribute
-- builds guest pointers to the embedded v1 LS pattern and task argument
-- calls existing `_spurs::create_task()` and then `_spurs::task_start()`; no raw TaskInfo/bitmap/scheduler/EventFlag mutation was added
+## Authentic GTA Bink geometry
 
-For GTA's observed `sizeContext=0x1400`, the existing production packing remains authoritative: `_spurs::create_task()` derives two allocated LS blocks and packs `context EA | 2`, e.g. `0x104acb02`, instead of the previous zero context metadata produced by the stub path.
+The authenticated Bink pattern is:
 
-## Files changed
+```text
+00000000 00000040 00000000 00000001
+```
 
-Intended files only:
+Selected blocks: `57`, `127`
+
+Popcount: `2`
+
+Compact required size:
+
+```text
+0x400 + 2 * 0x800 = 0x1400
+```
+
+Expected mapping after this correction:
+
+- block 57 LS range `0x1c800..0x1cfff` <-> context `+0x400..+0xbff` (slot 0)
+- block 127 LS range `0x3f800..0x3ffff` <-> context `+0xc00..+0x13ff` (slot 1)
+
+The final selected-block byte therefore ends at `context+0x13ff`; there is no selected-LS payload write at or beyond `context+0x1400` for this two-block Bink allocation.
+
+The existing creation contract is preserved:
+
+```text
+alloc_ls_blocks = (0x1400 - 0x400) >> 11 = 2
+popcount(pattern) = 2
+TaskInfo low allocated-block count = 0x02
+```
+
+No reinterpretation of `context_save_storage_and_alloc_ls_blocks` was introduced.
+
+## Preserved production behavior
+
+The following behavior was intentionally left unchanged:
+
+- processor context copy remains at context base, with the existing `0x380` copy;
+- stack-coverage validation still requires the saved SP through block 127 to be represented in the LS pattern;
+- `lsBlocks > allocLsBlocks` remains a task state error;
+- management LS blocks 0..5 remain invalid for task save patterns;
+- the LS pattern remains the mapping metadata;
+- TaskInfo keeps the low-seven-bit allocated-block count;
+- the private Lane172 v1 attribute layout and exact six-argument `_cellSpursTaskAttributeInitialize` ABI are unchanged;
+- task creation still delegates to `_spurs::create_task()` and then existing `_spurs::task_start()`;
+- scheduler, EventFlag, reservation, workload, DMA-wait semantics, and unrelated SPURS paths were not touched;
+- inherited private production snapshot changes predating Lane172 were not rewritten.
+
+## Test-source decision
+
+No suitable existing aPS3e/RPCS3 unit-test harness was found under this repository's `app/src` or nearby repository test layout during bounded source inspection. Task178 explicitly forbids inventing a large framework, so no new test framework or standalone executable was added.
+
+A follow-up validation lane should exercise at minimum:
+
+1. size helper: empty -> `0x400`;
+2. size helper: block6 -> `0xc00`;
+3. size helper: blocks57+127 -> `0x1400`;
+4. size helper: three valid blocks including127 -> `0x1c00`;
+5. size helper/initializer: management block0..5 -> `CELL_SPURS_TASK_ERROR_INVAL`;
+6. initializer/decoder: Bink size `0x1400`, blocks57+127 -> accept;
+7. initializer/decoder: same two-block pattern with context smaller than `0x1400` -> reject;
+8. save: blocks57+127 write only context slots `+0x400` and `+0xc00`, with a canary immediately after `+0x13ff` unchanged;
+9. restore: compact slots roundtrip exactly back to LS blocks57 and127, with unsaved neighbors unchanged;
+10. TaskInfo: Bink packed allocated-block count remains `2`.
+
+No compile or test execution was performed in this lane, by instruction.
+
+## Source-only validation
+
+`git diff --check` passed after the source patch.
+
+The intended modified source scope is only:
 
 - `app/src/main/cpp/rpcs3/rpcs3/Emu/Cell/Modules/cellSpurs.cpp`
+- `app/src/main/cpp/rpcs3/rpcs3/Emu/Cell/Modules/cellSpursSpu.cpp`
 - `AGENT_RESULT.md`
 
-No public header, `cellSpursSpu.cpp`, EventFlag implementation, generic SPU opcode path, Android/JNI glue, protected asset, configuration, or production worktree was changed.
+## Remaining ABI uncertainty
 
-## Risks / follow-up
+Lane177 established the compact contract for the production-relevant GTA Bink path from the retail title's own size calculation/allocation sequence, its actual SPU ELF-derived pattern, live TaskInfo state, and aPS3e's allocated-block-count creation contract.
 
-- No compilation or runtime validation was performed because Task172 explicitly prohibits builds/tests/probes. The source was limited to local conventions and checked with `git diff --check`.
-- The private v1 byte layout is intentionally isolated because public RPCS3 exposes v1 as opaque. It is supported by the local SDK declaration, GTA caller reconstruction/live descriptor evidence, and local host-native reference, but should remain private until an upstream/public ABI type is authoritative.
-- `_spurs::create_task()` still contains its historical popcount-based internal LS allocation validation. This lane does not rewrite that function; the v1 decoder now performs the stricter sparse-span capacity validation before delegating, while the standalone size helper exposes the correct sparse span.
-- Invalid-but-mapped guest-address probing is not added; pointer handling follows the existing production RPCS3 convention of explicit null/alignment/semantic checks with guest dereference through `vm::ptr`/`vm::cptr`.
-- The v1 exit-code-container field is zero-initialized but `cellSpursTaskAttributeSetExitCodeContainer` is outside Task172 scope and remains unchanged.
+A locally cached `task.h` declares the Sony-era API shape but does not document the size formula and lacks independent provenance sufficient to claim universal Sony-library behavior. Therefore this patch does **not** claim that every historical Sony implementation of `cellSpursTaskGetContextSaveAreaSize()` used this exact formula in every circumstance.
 
-## Recommended focused tests for the authorized validation lane
+That universal-ABI uncertainty is separate from the production bug corrected here. For the authenticated GTA path, retaining sparse absolute main-memory offsets would overflow the title's actual compact allocation. Old RPCS3's longstanding sparse save/restore behavior is therefore not reintroduced merely as precedent.
 
-1. Size helper vectors: empty -> `0x400`; only block 6 -> `0xc00`; only block 7 -> `0x1400`; only block 127 -> `0x3d400`; sparse block 6 + 127 -> `0x3d400`; any block 0..5 -> `INVAL`; null/misaligned pointers -> matching SPURS task errors.
-2. Initializer byte-layout test with GTA-shaped descriptor: verify revision/SDK/ELF/context/size offsets, copied LS-pattern bytes, zeroed reserved bytes, and zero task argument when argument is null.
-3. Initializer negative cases: revision != 1, SDK 0, null/misaligned ELF, misaligned save-config, old/new-SDK context alignment, missing/misaligned LS pattern, management block selection, no-context inconsistency, and context size below sparse required span.
-4. Create-with-attribute adapter test: confirm `_spurs::create_task()` receives the decoded ELF/context/size/pattern/argument and existing task-start semantics publish the task exactly once.
-5. GTA Bink integration after a permitted build: verify both worker attributes retain `0x104acb00` / `0x104ae000` context storage, TaskInfo packed context is nonzero (first worker expected `0x104acb02` for `0x1400`), blocking receive no longer returns `CELL_SPURS_TASK_ERROR_STAT` because context storage was discarded, and no EventFlag semantics change is needed.
+## Disposition
+
+Source correction is ready for the separately required independent review. It has not been merged, built, installed, or runtime-tested. A reviewer must approve the combined Lane172 bridge + Lane178 compact saver/size correction before any focused compile/test or Android integration work.
