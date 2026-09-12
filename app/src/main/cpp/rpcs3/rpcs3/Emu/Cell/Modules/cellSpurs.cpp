@@ -4082,6 +4082,132 @@ s32 cellSpursShutdownTaskset(ppu_thread& ppu, vm::ptr<CellSpursTaskset> taskset)
 	return shutdown_error;
 }
 
+namespace
+{
+	struct spurs_task_save_config_v1
+	{
+		be_t<u32> ea_context;
+		be_t<u32> size_context;
+		be_t<u32> ls_pattern;
+	};
+
+	static_assert(sizeof(spurs_task_save_config_v1) == 0xc);
+
+	struct alignas(16) spurs_task_attribute_v1
+	{
+		be_t<u32> revision;                  // 0x00
+		be_t<u32> sdk_version;               // 0x04
+		be_t<u64> elf;                       // 0x08
+		be_t<u64> context;                   // 0x10
+		be_t<u32> context_size;              // 0x18
+		be_t<u32> reserved_1c;               // 0x1c
+		CellSpursTaskLsPattern ls_pattern;    // 0x20
+		CellSpursTaskArgument argument;       // 0x30
+		be_t<u32> exit_code_container;        // 0x40
+		u8 reserved[0xbc];                    // 0x44
+	};
+
+	static_assert(sizeof(spurs_task_attribute_v1) == sizeof(CellSpursTaskAttribute));
+	static_assert(alignof(spurs_task_attribute_v1) == alignof(CellSpursTaskAttribute));
+
+	constexpr u32 spurs_task_v1_ls_pattern_offset = 0x20;
+	constexpr u32 spurs_task_v1_argument_offset = 0x30;
+
+	s32 spurs_task_context_save_area_size(const CellSpursTaskLsPattern& pattern, u32& size)
+	{
+		// LS blocks 0..5 belong to the SPURS management area and cannot be saved by a task.
+		if (+pattern._u32[0] & 0xfc000000u)
+		{
+			return CELL_SPURS_TASK_ERROR_INVAL;
+		}
+
+		size = CELL_SPURS_TASK_EXECUTION_CONTEXT_SIZE;
+
+		// cellSpursSpu.cpp stores block N at 0x400 + ((N - 6) << 11), so a sparse
+		// pattern needs capacity through its highest selected absolute LS block.
+		for (s32 block = 127; block >= 6; block--)
+		{
+			const u32 bit = 1u << (31 - (block & 31));
+			if (+pattern._u32[block >> 5] & bit)
+			{
+				size += static_cast<u32>(block - 5) * 0x800;
+				break;
+			}
+		}
+
+		return CELL_OK;
+	}
+
+	bool spurs_task_pattern_is_empty(const CellSpursTaskLsPattern& pattern)
+	{
+		return !(+pattern._u32[0] | +pattern._u32[1] | +pattern._u32[2] | +pattern._u32[3]);
+	}
+
+	s32 spurs_decode_task_attribute_v1(vm::cptr<CellSpursTaskAttribute> attribute, u32& elf_addr, u32& context_addr, u32& context_size)
+	{
+		const auto& attr = *reinterpret_cast<const spurs_task_attribute_v1*>(attribute.get_ptr());
+		const u32 revision = +attr.revision;
+		const u32 sdk_version = +attr.sdk_version;
+		const u64 elf = +attr.elf;
+		const u64 context = +attr.context;
+
+		if (revision != CELL_SPURS_TASK_ATTRIBUTE_REVISION || !sdk_version)
+		{
+			return CELL_SPURS_TASK_ERROR_INVAL;
+		}
+
+		if (!elf)
+		{
+			return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+		}
+
+		if (elf > 0xffffffffull || context > 0xffffffffull)
+		{
+			return CELL_SPURS_TASK_ERROR_INVAL;
+		}
+
+		elf_addr = static_cast<u32>(elf);
+		context_addr = static_cast<u32>(context);
+		context_size = +attr.context_size;
+
+		if (elf_addr & 0xf)
+		{
+			return CELL_SPURS_TASK_ERROR_ALIGN;
+		}
+
+		if (context_addr)
+		{
+			const u32 context_alignment = sdk_version < 0x27ffff ? 16 : 128;
+			if (context_addr % context_alignment)
+			{
+				return CELL_SPURS_TASK_ERROR_ALIGN;
+			}
+
+			if (context_size < CELL_SPURS_TASK_EXECUTION_CONTEXT_SIZE)
+			{
+				return CELL_SPURS_TASK_ERROR_INVAL;
+			}
+
+			u32 required_size = 0;
+			if (const s32 rc = spurs_task_context_save_area_size(attr.ls_pattern, required_size))
+			{
+				return rc;
+			}
+
+			if (context_size < required_size)
+			{
+				return CELL_SPURS_TASK_ERROR_INVAL;
+			}
+		}
+		else if (context_size || !spurs_task_pattern_is_empty(attr.ls_pattern))
+		{
+			return CELL_SPURS_TASK_ERROR_INVAL;
+		}
+
+		return CELL_OK;
+	}
+}
+
 s32 _spurs::create_task(vm::ptr<CellSpursTaskset> taskset, vm::ptr<u32> task_id, vm::cptr<void> elf, vm::cptr<void> context, u32 size, vm::ptr<CellSpursTaskLsPattern> ls_pattern, vm::ptr<CellSpursTaskArgument> arg)
 {
 	if (!taskset || !elf)
@@ -4322,10 +4448,44 @@ s32 _cellSpursSendSignal(ppu_thread& ppu, vm::ptr<CellSpursTaskset> taskset, u32
 	return CELL_OK;
 }
 
-s32 cellSpursCreateTaskWithAttribute()
+s32 cellSpursCreateTaskWithAttribute(ppu_thread& ppu, vm::ptr<CellSpursTaskset> taskset, vm::ptr<u32> task_id, vm::cptr<CellSpursTaskAttribute> attribute)
 {
-	UNIMPLEMENTED_FUNC(cellSpurs);
-	return CELL_OK;
+	cellSpurs.warning("cellSpursCreateTaskWithAttribute(taskset=*0x%x, task_id=*0x%x, attribute=*0x%x)", taskset, task_id, attribute);
+
+	if (!taskset || !task_id || !attribute)
+	{
+		return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+	}
+
+	if (!taskset.aligned() || !task_id.aligned() || !attribute.aligned())
+	{
+		return CELL_SPURS_TASK_ERROR_ALIGN;
+	}
+
+	u32 elf_addr = 0;
+	u32 context_addr = 0;
+	u32 context_size = 0;
+	if (const s32 rc = spurs_decode_task_attribute_v1(attribute, elf_addr, context_addr, context_size))
+	{
+		return rc;
+	}
+
+	vm::cptr<void> context = vm::null;
+	vm::ptr<CellSpursTaskLsPattern> ls_pattern = vm::null;
+	if (context_addr)
+	{
+		context = vm::cptr<void>::make(context_addr);
+		ls_pattern = vm::ptr<CellSpursTaskLsPattern>::make(attribute.addr() + spurs_task_v1_ls_pattern_offset);
+	}
+
+	const auto argument = vm::ptr<CellSpursTaskArgument>::make(attribute.addr() + spurs_task_v1_argument_offset);
+	auto rc = _spurs::create_task(taskset, task_id, vm::cptr<void>::make(elf_addr), context, context_size, ls_pattern, argument);
+	if (rc != CELL_OK)
+	{
+		return rc;
+	}
+
+	return _spurs::task_start(ppu, taskset, *task_id);
 }
 
 s32 cellSpursTasksetAttributeSetName(vm::ptr<CellSpursTasksetAttribute> attr, vm::cptr<char> name)
@@ -4443,9 +4603,94 @@ s32 cellSpursTaskGenerateLsPattern()
 	return CELL_OK;
 }
 
-s32 _cellSpursTaskAttributeInitialize()
+s32 _cellSpursTaskAttributeInitialize(vm::ptr<CellSpursTaskAttribute> attribute, u32 revision, u32 sdk_version, vm::cptr<void> elf,
+	vm::cptr<spurs_task_save_config_v1> save_config, vm::cptr<CellSpursTaskArgument> argument)
 {
-	UNIMPLEMENTED_FUNC(cellSpurs);
+	cellSpurs.warning("_cellSpursTaskAttributeInitialize(attribute=*0x%x, revision=%u, sdk_version=0x%x, elf=*0x%x, save_config=*0x%x, argument=*0x%x)",
+		attribute, revision, sdk_version, elf, save_config, argument);
+
+	if (!attribute || !elf)
+	{
+		return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+	}
+
+	if (!attribute.aligned() || !elf.aligned(16) || (save_config && !save_config.aligned()) || (argument && !argument.aligned(16)))
+	{
+		return CELL_SPURS_TASK_ERROR_ALIGN;
+	}
+
+	if (revision != CELL_SPURS_TASK_ATTRIBUTE_REVISION || !sdk_version)
+	{
+		return CELL_SPURS_TASK_ERROR_INVAL;
+	}
+
+	u32 context_addr = 0;
+	u32 context_size = 0;
+	vm::cptr<CellSpursTaskLsPattern> ls_pattern = vm::null;
+
+	if (save_config)
+	{
+		context_addr = +save_config->ea_context;
+		context_size = +save_config->size_context;
+		const u32 ls_pattern_addr = +save_config->ls_pattern;
+
+		if (ls_pattern_addr)
+		{
+			ls_pattern = vm::cptr<CellSpursTaskLsPattern>::make(ls_pattern_addr);
+			if (!ls_pattern.aligned(16))
+			{
+				return CELL_SPURS_TASK_ERROR_ALIGN;
+			}
+		}
+
+		if (context_addr)
+		{
+			const u32 context_alignment = sdk_version < 0x27ffff ? 16 : 128;
+			if (context_addr % context_alignment)
+			{
+				return CELL_SPURS_TASK_ERROR_ALIGN;
+			}
+
+			if (!ls_pattern || context_size < CELL_SPURS_TASK_EXECUTION_CONTEXT_SIZE)
+			{
+				return CELL_SPURS_TASK_ERROR_INVAL;
+			}
+
+			u32 required_size = 0;
+			if (const s32 rc = spurs_task_context_save_area_size(*ls_pattern, required_size))
+			{
+				return rc;
+			}
+
+			if (context_size < required_size)
+			{
+				return CELL_SPURS_TASK_ERROR_INVAL;
+			}
+		}
+		else if (context_size || ls_pattern_addr)
+		{
+			return CELL_SPURS_TASK_ERROR_INVAL;
+		}
+	}
+
+	std::memset(attribute.get_ptr(), 0, sizeof(CellSpursTaskAttribute));
+	auto& attr = *reinterpret_cast<spurs_task_attribute_v1*>(attribute.get_ptr());
+	attr.revision = revision;
+	attr.sdk_version = sdk_version;
+	attr.elf = elf.addr();
+	attr.context = context_addr;
+	attr.context_size = context_size;
+
+	if (ls_pattern)
+	{
+		attr.ls_pattern = *ls_pattern;
+	}
+
+	if (argument)
+	{
+		attr.argument = *argument;
+	}
+
 	return CELL_OK;
 }
 
@@ -4473,9 +4718,27 @@ s32 _cellSpursTaskAttribute2Initialize(vm::ptr<CellSpursTaskAttribute2> attribut
 	return CELL_OK;
 }
 
-s32 cellSpursTaskGetContextSaveAreaSize()
+s32 cellSpursTaskGetContextSaveAreaSize(vm::ptr<u32> size, vm::cptr<CellSpursTaskLsPattern> ls_pattern)
 {
-	UNIMPLEMENTED_FUNC(cellSpurs);
+	cellSpurs.warning("cellSpursTaskGetContextSaveAreaSize(size=*0x%x, ls_pattern=*0x%x)", size, ls_pattern);
+
+	if (!size || !ls_pattern)
+	{
+		return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+	}
+
+	if (!size.aligned() || !ls_pattern.aligned(16))
+	{
+		return CELL_SPURS_TASK_ERROR_ALIGN;
+	}
+
+	u32 required_size = 0;
+	if (const s32 rc = spurs_task_context_save_area_size(*ls_pattern, required_size))
+	{
+		return rc;
+	}
+
+	*size = required_size;
 	return CELL_OK;
 }
 
