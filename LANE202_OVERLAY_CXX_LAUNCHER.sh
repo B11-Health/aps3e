@@ -3,7 +3,7 @@ set -euo pipefail
 
 HOME_ROOT="/data/data/com.termux/files/home"
 PREFIX="/data/data/com.termux/files/usr"
-WORKTREE="$HOME_ROOT/projects/android/gamedeck-ps3-prod-lanes-20260912/lane202-coordinator-link-isolation-candidate"
+WORKTREE="$HOME_ROOT/projects/android/gamedeck-ps3-prod-lanes-20260912/lane207-v7-fresh-build-successor"
 SELF_EXPECTED="$WORKTREE/LANE202_OVERLAY_CXX_LAUNCHER.sh"
 WRAPPER_EXPECTED="$WORKTREE/LANE202_BUILD_WRAPPER.sh"
 LANE187_REPO="$HOME_ROOT/projects/android/gamedeck-ps3-prod-lanes-20260912/lane187-prod-spurs-canary-instrumentation"

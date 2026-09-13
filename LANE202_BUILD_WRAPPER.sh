@@ -4,7 +4,7 @@ umask 077
 
 HOME_ROOT="/data/data/com.termux/files/home"
 PREFIX="/data/data/com.termux/files/usr"
-WORKTREE="$HOME_ROOT/projects/android/gamedeck-ps3-prod-lanes-20260912/lane202-coordinator-link-isolation-candidate"
+WORKTREE="$HOME_ROOT/projects/android/gamedeck-ps3-prod-lanes-20260912/lane207-v7-fresh-build-successor"
 SELF_EXPECTED="$WORKTREE/LANE202_BUILD_WRAPPER.sh"
 LAUNCHER="$WORKTREE/LANE202_OVERLAY_CXX_LAUNCHER.sh"
 BASE190="5bcb30260fce516c23e77b5ba32a43c09dd5d606"
@@ -35,8 +35,9 @@ PRIOR_FRESH_BUILD_V2="$HOME_ROOT/.cache/gd-prod-spurs-lane187-canary-build-v2"
 PRIOR_FRESH_BUILD_V3="$HOME_ROOT/.cache/gd-prod-spurs-lane187-canary-build-v3"
 PRIOR_FRESH_BUILD_V4="$HOME_ROOT/.cache/gd-prod-spurs-lane187-canary-build-v4"
 PRIOR_FRESH_BUILD_V5="$HOME_ROOT/.cache/gd-prod-spurs-lane187-canary-build-v5"
-FRESH_BUILD_V6="$HOME_ROOT/.cache/gd-prod-spurs-lane187-canary-build-v6"
-BUILD="$FRESH_BUILD_V6"
+PRIOR_FRESH_BUILD_V6="$HOME_ROOT/.cache/gd-prod-spurs-lane187-canary-build-v6"
+FRESH_BUILD_V7="$HOME_ROOT/.cache/gd-prod-spurs-lane187-canary-build-v7"
+BUILD="$FRESH_BUILD_V7"
 MIN_KIB=4194304
 TRACE_HEADER=$'#LANE202_OVERLAY_TRACE_V1\tutc_timestamp\ttu\tcandidate_sha256\tcompiler\tcanonical_source\tcandidate_source'
 
@@ -564,13 +565,14 @@ validate_trace() {
 }
 
 STAGE="build_path_contract_preflight"
-(( $# == 0 )) || die 147 "wrapper accepts no arguments or build-dir overrides; only pinned v6 build path is permitted"
-[[ "$BUILD" == "$FRESH_BUILD_V6" ]] || die 148 "future build path is not exact pinned v6 path: $BUILD"
+(( $# == 0 )) || die 147 "wrapper accepts no arguments or build-dir overrides; only pinned v7 build path is permitted"
+[[ "$BUILD" == "$FRESH_BUILD_V7" ]] || die 148 "future build path is not exact pinned v7 path: $BUILD"
 [[ "$BUILD" != "$OLD_CONTAMINATED_BUILD" ]] || die 149 "refusing contaminated retired v1 build path: $OLD_CONTAMINATED_BUILD"
 [[ "$BUILD" != "$PRIOR_FRESH_BUILD_V2" ]] || die 150 "refusing prior v2 build path: $PRIOR_FRESH_BUILD_V2"
 [[ "$BUILD" != "$PRIOR_FRESH_BUILD_V3" ]] || die 154 "refusing prior v3 build path: $PRIOR_FRESH_BUILD_V3"
 [[ "$BUILD" != "$PRIOR_FRESH_BUILD_V4" ]] || die 155 "refusing contaminated v4 build path: $PRIOR_FRESH_BUILD_V4"
 [[ "$BUILD" != "$PRIOR_FRESH_BUILD_V5" ]] || die 170 "refusing prior v5 build path: $PRIOR_FRESH_BUILD_V5"
+[[ "$BUILD" != "$PRIOR_FRESH_BUILD_V6" ]] || die 171 "refusing consumed v6 build path: $PRIOR_FRESH_BUILD_V6"
 
 STAGE="tool_preflight"
 for tool in git sha256sum awk grep cmake ninja ccache file readelf stat date df find chmod readlink env; do
