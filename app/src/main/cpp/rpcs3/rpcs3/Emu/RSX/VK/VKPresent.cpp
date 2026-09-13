@@ -5,6 +5,7 @@
 #include "Emu/RSX/Overlays/overlay_manager.h"
 #include "Emu/RSX/Overlays/overlay_debug_overlay.h"
 #include "Emu/Cell/Modules/cellVideoOut.h"
+#include "Emu/GameDeckTrace.h"
 
 #include "upscalers/bilinear_pass.hpp"
 #include "upscalers/fsr_pass.h"
@@ -310,6 +311,9 @@ void VKGSRender::frame_context_cleanup(vk::frame_context_t *ctx)
 vk::viewable_image* VKGSRender::get_present_source(/* inout */ vk::present_surface_info* info, const rsx::avconf& avconfig)
 {
 	vk::viewable_image* image_to_flip = nullptr;
+#if defined(__ANDROID__)
+	const char* gd_present_source_kind = "none";
+#endif
 
 	// @FIXME: This entire function needs to be rewritten to go through the texture cache's "upload_texture" routine.
 	// That method is not a 1:1 replacement due to handling of insets that is done differently here.
@@ -351,6 +355,9 @@ vk::viewable_image* VKGSRender::get_present_source(/* inout */ vk::present_surfa
 			if (viable)
 			{
 				image_to_flip = section.surface->get_surface(rsx::surface_access::transfer_read);
+#if defined(__ANDROID__)
+				gd_present_source_kind = "rtt";
+#endif
 
 				std::tie(info->width, info->height) = rsx::apply_resolution_scale<true>(
 					resolution_scaling_config,
@@ -365,6 +372,9 @@ vk::viewable_image* VKGSRender::get_present_source(/* inout */ vk::present_surfa
 		// Hack - this should be the first location to check for output
 		// The render might have been done offscreen or in software and a blit used to display
 		image_to_flip = dynamic_cast<vk::viewable_image*>(surface->get_raw_texture());
+#if defined(__ANDROID__)
+		gd_present_source_kind = "texture_dims";
+#endif
 	}
 
 	// The correct output format is determined by the AV configuration set in CellVideoOutConfigure by the game.
@@ -374,6 +384,9 @@ vk::viewable_image* VKGSRender::get_present_source(/* inout */ vk::present_surfa
 
 	if (!image_to_flip) [[ unlikely ]]
 	{
+#if defined(__ANDROID__)
+		gd_present_source_kind = "cell_upload";
+#endif
 		// Read from cell
 		const auto range = utils::address_range32::start_length(info->address, info->pitch * info->height);
 		const u32  lookup_mask = rsx::texture_upload_context::blit_engine_dst | rsx::texture_upload_context::framebuffer_storage;
@@ -423,6 +436,19 @@ vk::viewable_image* VKGSRender::get_present_source(/* inout */ vk::present_surfa
 			m_texture_cache.dispose_reusable_image(dst_img);
 		}
 	}
+
+#if defined(__ANDROID__)
+	static thread_local u64 gd_present_source_count = 0;
+	const u64 gd_present_source_n = ++gd_present_source_count;
+	if (gd_present_source_n <= 8 || (gd_present_source_n & 0x3fu) == 0)
+	{
+		gamedeck_trace::emit("vk_present_source",
+			"count=%llu\taddr=0x%08x\twidth=%u\theight=%u\tpitch=%u\tformat=%u\tsource=%s\timage=%u\timage_format=%u",
+			static_cast<unsigned long long>(gd_present_source_n), info->address, info->width, info->height, info->pitch,
+			static_cast<unsigned>(info->format), gd_present_source_kind, image_to_flip ? 1u : 0u,
+			image_to_flip ? static_cast<unsigned>(image_to_flip->format()) : 0u);
+	}
+#endif
 
 	return image_to_flip;
 }
@@ -563,6 +589,18 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 			.pitch = buffer_pitch,
 			.eye = 0
 		};
+#if defined(__ANDROID__)
+		static thread_local u64 gd_vk_flip_meta_count = 0;
+		const u64 gd_vk_flip_meta_n = ++gd_vk_flip_meta_count;
+		if (gd_vk_flip_meta_n <= 8 || (gd_vk_flip_meta_n & 0x3fu) == 0)
+		{
+			gamedeck_trace::emit("vk_flip_meta",
+				"count=%llu\tbuffer=%u\toffset=0x%08x\taddr=0x%08x\twidth=%u\theight=%u\tpitch=%u\tformat=%u\tdraw_calls=%u\tsubmits=%u\tskip=%u\temu_flip=%u",
+				static_cast<unsigned long long>(gd_vk_flip_meta_n), info.buffer, display_buffers[info.buffer].offset, present_info.address,
+				present_info.width, present_info.height, present_info.pitch, static_cast<unsigned>(present_info.format),
+				info.stats.draw_calls, info.stats.submit_count, info.skip_frame ? 1u : 0u, info.emu_flip ? 1u : 0u);
+		}
+#endif
 		image_to_flip = get_present_source(&present_info, avconfig);
 
 		if (avconfig.stereo_enabled) [[unlikely]]
