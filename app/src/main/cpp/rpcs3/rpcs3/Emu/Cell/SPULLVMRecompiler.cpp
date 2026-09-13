@@ -12,6 +12,7 @@
 #include "Utilities/JIT.h"
 
 #include "SPUThread.h"
+#include "Emu/Cell/spurs_live_canary.h"
 #include "SPUAnalyser.h"
 #include "SPUInterpreter.h"
 #include <algorithm>
@@ -5272,6 +5273,10 @@ public:
 					call("spu_exec_mfc_cmd", &exec_mfc_cmd<false>, m_thread);
 					m_ir->CreateBr(next);
 					m_ir->SetInsertPoint(copy);
+
+					call("spurs_live_canary_mfc", &spurs_live_canary::observe_mfc, m_thread,
+						m_ir->getInt32(static_cast<u32>(cmd)), eal.value, lsa.value,
+						zext<u32>(size).eval(m_ir), zext<u32>(tag).eval(m_ir));
 
 					llvm::Type* vtype = get_type<u8[16]>();
 

@@ -20,6 +20,8 @@
 #include "Emu/Cell/SPUDisAsm.h"
 #include "Emu/Cell/SPUAnalyser.h"
 #include "Emu/Cell/SPUThread.h"
+#include "Emu/Cell/spurs_live_canary.h"
+#include "Crypto/utils.h"
 #include "Emu/Cell/SPURecompiler.h"
 #include "Emu/Cell/timers.hpp"
 
@@ -2035,8 +2037,62 @@ void spu_thread::push_snr(u32 number, u32 value)
 	});
 }
 
+void spurs_live_canary::observe_mfc(spu_thread* spu, u32 cmd, u32 eal, u32 lsa, u32 size, u32 tag)
+{
+	if (!spu || !size)
+	{
+		return;
+	}
+
+	spurs_live_canary::snapshot snap{};
+	if (!spurs_live_canary::read(snap))
+	{
+		return;
+	}
+
+	const u32 base_cmd = cmd & ~(MFC_BARRIER_MASK | MFC_FENCE_MASK | MFC_START_MASK);
+	const bool is_get = base_cmd == MFC_GET_CMD;
+	const bool is_put = base_cmd == MFC_PUT_CMD;
+	if (!is_get && !is_put)
+	{
+		return;
+	}
+
+	const u64 transfer_begin = eal;
+	const u64 transfer_end = transfer_begin + size;
+	const u64 context_begin = snap.context;
+	const u64 context_end = context_begin + 0x1400;
+	if (transfer_end <= transfer_begin || transfer_end <= context_begin || transfer_begin >= context_end)
+	{
+		return;
+	}
+
+	const u64 overlap_begin = std::max(transfer_begin, context_begin);
+	const u64 overlap_end = std::min(transfer_end, context_end);
+	const u32 overlap_size = static_cast<u32>(overlap_end - overlap_begin);
+	const u32 transfer_delta = static_cast<u32>(overlap_begin - transfer_begin);
+	const u32 overlap_lsa = (lsa & 0x3ffff) + transfer_delta;
+	if (overlap_lsa > SPU_LS_SIZE || overlap_size > SPU_LS_SIZE - overlap_lsa)
+	{
+		spu_log.error("SPURS_CANARY_LIVE_FAIL phase=DMA reason=ls_range dir=%s taskset=0x%x task=%u context=0x%x eal=0x%x lsa=0x%x size=0x%x overlap_lsa=0x%x overlap_size=0x%x pc=0x%x",
+			is_get ? "GET" : "PUT", snap.taskset, snap.task, snap.context, eal, lsa & 0x3ffff, size, overlap_lsa, overlap_size, spu->pc);
+		return;
+	}
+
+	const u8* source = is_get ? vm::_ptr<u8>(static_cast<u32>(overlap_begin)) : spu->ls + overlap_lsa;
+	const std::string source_hash = sha256_get_hash(reinterpret_cast<const char*>(source), overlap_size, true);
+	const u32 context_offset = static_cast<u32>(overlap_begin - context_begin);
+	const char* region = context_offset < 0x380 ? "fixed" : context_offset < 0x400 ? "gap" : context_offset < 0xc00 ? "slot0" : "slot1";
+
+	spu_log.notice("SPURS_CANARY_LIVE phase=DMA dir=%s role=%s taskset=0x%x task=%u context=0x%x ctx_off=0x%x eal=0x%x lsa=0x%x size=0x%x overlap=0x%x tag=%u cmd=0x%x pc=0x%x region=%s src_sha256=%s",
+		is_get ? "GET" : "PUT", is_get ? "RESTORE_CANDIDATE" : "SAVE_CANDIDATE", snap.taskset, snap.task, snap.context,
+		context_offset, eal, overlap_lsa, size, overlap_size, tag, cmd, spu->pc, region, source_hash);
+}
+
 void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8* ls)
 {
+	spurs_live_canary::observe_mfc(_this, static_cast<u32>(args.cmd), args.eal, args.lsa, args.size, args.tag);
+
 	perf_meter<"DMA"_u32> perf_;
 
 	const bool is_get = (args.cmd & ~(MFC_BARRIER_MASK | MFC_FENCE_MASK | MFC_START_MASK)) == MFC_GET_CMD;
@@ -2856,7 +2912,7 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 
 	u8 optimization_compatible = transfer.cmd & (MFC_GET_CMD | MFC_PUT_CMD);
 
-	if (spu_log.trace || g_cfg.core.spu_accurate_dma || g_cfg.core.mfc_debug)
+	if (spu_log.trace || g_cfg.core.spu_accurate_dma || g_cfg.core.mfc_debug || spurs_live_canary::active())
 	{
 		optimization_compatible = 0;
 	}

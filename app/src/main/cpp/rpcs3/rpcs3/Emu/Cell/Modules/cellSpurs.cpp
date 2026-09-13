@@ -4,6 +4,7 @@
 #include "Emu/Memory/vm_reservation.h"
 #include "Emu/Cell/PPUModule.h"
 #include "Emu/Cell/SPUThread.h"
+#include "Emu/Cell/spurs_live_canary.h"
 #include "Emu/Cell/lv2/sys_lwmutex.h"
 #include "Emu/Cell/lv2/sys_lwcond.h"
 #include "Emu/Cell/lv2/sys_spu.h"
@@ -20,6 +21,52 @@
 #include "util/simd.hpp"
 
 LOG_CHANNEL(cellSpurs);
+
+
+namespace spurs_live_canary
+{
+	namespace
+	{
+		std::atomic<u32> g_state{0}; // 0=idle, 1=publishing, 2=armed
+		std::atomic<u32> g_context{0};
+		std::atomic<u32> g_taskset{0};
+		std::atomic<u32> g_task{0};
+	}
+
+	void arm(u32 context, u32 taskset, u32 task)
+	{
+		u32 expected = 0;
+		if (!g_state.compare_exchange_strong(expected, 1, std::memory_order_acq_rel))
+		{
+			return;
+		}
+
+		g_context.store(context, std::memory_order_relaxed);
+		g_taskset.store(taskset, std::memory_order_relaxed);
+		g_task.store(task, std::memory_order_relaxed);
+		g_state.store(2, std::memory_order_release);
+
+		cellSpurs.notice("SPURS_CANARY_LIVE phase=ARM taskset=0x%x task=%u context=0x%x capacity=0x1400", taskset, task, context);
+	}
+
+	bool active()
+	{
+		return g_state.load(std::memory_order_acquire) == 2;
+	}
+
+	bool read(snapshot& out)
+	{
+		if (!active())
+		{
+			return false;
+		}
+
+		out.context = g_context.load(std::memory_order_relaxed);
+		out.taskset = g_taskset.load(std::memory_order_relaxed);
+		out.task = g_task.load(std::memory_order_relaxed);
+		return out.context != 0;
+	}
+}
 
 template <>
 void fmt_class_string<CellSpursCoreError>::format(std::string& out, u64 arg)
@@ -4326,6 +4373,7 @@ s32 _spurs::create_task(vm::ptr<CellSpursTaskset> taskset, vm::ptr<u32> task_id,
 
 	if (ls_pattern && spurs_task_pattern_is_bink_canary(*ls_pattern) && size == 0x1400 && alloc_ls_blocks == 2)
 	{
+		spurs_live_canary::arm(context.addr(), taskset.addr(), tmp_task_id);
 		cellSpurs.notice("SPURS_CANARY phase=CREATE taskset=0x%x task=%u context=0x%x size=0x%x required=0x1400 alloc=%u packed=0x%x pattern=%08x:%08x:%08x:%08x",
 			taskset.addr(), tmp_task_id, context.addr(), size, alloc_ls_blocks, +taskset->task_info[tmp_task_id].context_save_storage_and_alloc_ls_blocks,
 			+ls_pattern->_u32[0], +ls_pattern->_u32[1], +ls_pattern->_u32[2], +ls_pattern->_u32[3]);
