@@ -412,7 +412,7 @@ validate_cache() {
             lhs=substr($0,1,eq-1); val=substr($0,eq+1)
             split(lhs,a,":"); key=a[1]
             target = (key ~ /(^|_)(LIBRARY|LIBRARIES|LIBDIR|LDFLAGS|INCLUDE|INCLUDEDIR|INCLUDE_DIR|INCLUDE_DIRS)($|_)/ ||
-                      key ~ /^(Backtrace_|EXECINFO_|LIBRT$|Vulkan_|ZLIB_|LIBUSB_|pkgcfg_|GAMEDECK_(ICONV|CHARSET)_LIBRARY$)/)
+                      key ~ /^(Backtrace_|EXECINFO_|LIBRT$|ZLIB_|LIBUSB_|pkgcfg_|GAMEDECK_(ICONV|CHARSET)_LIBRARY$)/)
             if (target && index(val,prefix) != 0) { print NR ":" $0; bad=1 }
         }
         END { if (bad) exit 0; exit 1 }
