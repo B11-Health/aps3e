@@ -22,6 +22,10 @@ add_library(rpcs3_emu STATIC
     IPC_socket.cpp
 )
 
+if(ANDROID)
+    target_compile_definitions(rpcs3_emu PUBLIC ANDROID)
+endif()
+
 if(USE_LTO)
     set_target_properties(rpcs3_emu PROPERTIES INTERPROCEDURAL_OPTIMIZATION ON)
 endif()
