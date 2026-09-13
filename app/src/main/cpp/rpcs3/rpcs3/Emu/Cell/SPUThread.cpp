@@ -2912,7 +2912,7 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 
 	u8 optimization_compatible = transfer.cmd & (MFC_GET_CMD | MFC_PUT_CMD);
 
-	if (spu_log.trace || g_cfg.core.spu_accurate_dma || g_cfg.core.mfc_debug || spurs_live_canary::active())
+	if (spu_log.trace || g_cfg.core.spu_accurate_dma || g_cfg.core.mfc_debug)
 	{
 		optimization_compatible = 0;
 	}
@@ -2954,6 +2954,17 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 				{
 					// Execute the postponed byteswapping and masking
 					s_size = std::bit_cast<be_t<u32>>(s_size) & ts_mask;
+
+					if (spurs_live_canary::active())
+					{
+						const u32 stride = utils::align<u32>(s_size, 16);
+						for (u32 i = 0; i < fetch_size; i++)
+						{
+							const u32 ea = items[i].ea;
+							const u32 ea_lsa_offset = s_size < 16 ? (ea & 0xf) : 0;
+							spurs_live_canary::observe_mfc(this, static_cast<u32>(transfer.cmd), ea, arg_lsa + i * stride + ea_lsa_offset, s_size, transfer.tag);
+						}
+					}
 
 					u8* src = vm::_ptr<u8>(0);
 					u8* dst = this->ls + arg_lsa;
@@ -3234,6 +3245,8 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 		// Try to inline the transfer
 		if (addr < RAW_SPU_BASE_ADDR && size && optimization_compatible == MFC_GET_CMD)
 		{
+			spurs_live_canary::observe_mfc(this, static_cast<u32>(transfer.cmd), addr, arg_lsa | (addr & 0xf), size, transfer.tag);
+
 			const u8* src = vm::_ptr<u8>(addr);
 			u8* dst = this->ls + arg_lsa + (addr & 0xf);
 
@@ -3305,6 +3318,8 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 		// Avoid inlining huge transfers because it intentionally drops range lock unlock
 		else if (optimization_compatible == MFC_PUT_CMD && ((addr >> 28 == rsx::constants::local_mem_base >> 28) || (addr < RAW_SPU_BASE_ADDR && size - 1 <= 0x400 - 1 && (addr % 0x10000 + (size - 1)) < 0x10000)))
 		{
+			spurs_live_canary::observe_mfc(this, static_cast<u32>(transfer.cmd), addr, arg_lsa | (addr & 0xf), size, transfer.tag);
+
 			if (addr >> 28 != rsx::constants::local_mem_base >> 28)
 			{
 				rsx_lock.update_if_enabled(addr, size, range_lock);
