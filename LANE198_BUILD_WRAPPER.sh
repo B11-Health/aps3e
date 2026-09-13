@@ -4,9 +4,9 @@ umask 077
 
 HOME_ROOT="/data/data/com.termux/files/home"
 PREFIX="/data/data/com.termux/files/usr"
-WORKTREE="$HOME_ROOT/projects/android/gamedeck-ps3-prod-lanes-20260912/lane196-prod-spurs-canary-build-wrapper-v3"
-SELF_EXPECTED="$WORKTREE/LANE196_BUILD_WRAPPER.sh"
-LAUNCHER="$WORKTREE/LANE196_OVERLAY_CXX_LAUNCHER.sh"
+WORKTREE="$HOME_ROOT/projects/android/gamedeck-ps3-prod-lanes-20260912/lane198-prod-spurs-canary-build-wrapper-v4"
+SELF_EXPECTED="$WORKTREE/LANE198_BUILD_WRAPPER.sh"
+LAUNCHER="$WORKTREE/LANE198_OVERLAY_CXX_LAUNCHER.sh"
 BASE190="5bcb30260fce516c23e77b5ba32a43c09dd5d606"
 ROOT="$HOME_ROOT/projects/android/gamedeck/mobile/android/vendor/aps3e-source"
 SRC="$ROOT/app/src/main/cpp"
@@ -30,10 +30,10 @@ TOOLCHAIN="$NDK/build/cmake/android.toolchain.cmake"
 TOOLCHAIN_SHA="dbad92d9dcfea0d32b7c5e5f82f5072d878ded5d46a5d3f1f581ea108ca7fe89"
 OLD_CONTAMINATED_BUILD="$HOME_ROOT/.cache/gd-prod-spurs-lane187-canary-build"
 PRIOR_FRESH_BUILD_V2="$HOME_ROOT/.cache/gd-prod-spurs-lane187-canary-build-v2"
-FRESH_BUILD_V3="$HOME_ROOT/.cache/gd-prod-spurs-lane187-canary-build-v3"
-BUILD="$FRESH_BUILD_V3"
+FRESH_BUILD_V4="$HOME_ROOT/.cache/gd-prod-spurs-lane187-canary-build-v4"
+BUILD="$FRESH_BUILD_V4"
 MIN_KIB=4194304
-TRACE_HEADER=$'#LANE196_OVERLAY_TRACE_V1\tutc_timestamp\ttu\tcandidate_sha256\tcompiler\tcanonical_source\tcandidate_source'
+TRACE_HEADER=$'#LANE198_OVERLAY_TRACE_V1\tutc_timestamp\ttu\tcandidate_sha256\tcompiler\tcanonical_source\tcandidate_source'
 
 GIT="$PREFIX/bin/git"
 SHA256SUM="$PREFIX/bin/sha256sum"
@@ -48,9 +48,9 @@ READELF="$PREFIX/bin/readelf"
 READLINK="$PREFIX/bin/readlink"
 CHMOD="$PREFIX/bin/chmod"
 
-APPROVED_COMMIT="${LANE196_APPROVED_COMMIT:-}"
-APPROVED_WRAPPER_SHA="${LANE196_APPROVED_WRAPPER_SHA256:-}"
-APPROVED_LAUNCHER_SHA="${LANE196_APPROVED_LAUNCHER_SHA256:-}"
+APPROVED_COMMIT="${LANE198_APPROVED_COMMIT:-}"
+APPROVED_WRAPPER_SHA="${LANE198_APPROVED_WRAPPER_SHA256:-}"
+APPROVED_LAUNCHER_SHA="${LANE198_APPROVED_LAUNCHER_SHA256:-}"
 
 STAGE="startup"
 FINAL_RESULT="FAILED_OR_INCOMPLETE"
@@ -90,7 +90,7 @@ trap 'exit 143' TERM
 die() {
     local rc="$1"
     shift
-    printf 'LANE196_BUILD_FAIL stage=%s rc=%s %s\n' "$STAGE" "$rc" "$*" >&2
+    printf 'LANE198_BUILD_FAIL stage=%s rc=%s %s\n' "$STAGE" "$rc" "$*" >&2
     exit "$rc"
 }
 
@@ -160,9 +160,9 @@ safe_new_text() {
 self_contract() {
     local self_source self_real head status wrapper_sha launcher_sha approved_wrapper_blob approved_launcher_blob runtime_wrapper_blob runtime_launcher_blob
 
-    [[ "$APPROVED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die 64 "LANE196_APPROVED_COMMIT must be exact 40-hex"
-    [[ "$APPROVED_WRAPPER_SHA" =~ ^[0-9a-f]{64}$ ]] || die 65 "LANE196_APPROVED_WRAPPER_SHA256 must be exact 64-hex"
-    [[ "$APPROVED_LAUNCHER_SHA" =~ ^[0-9a-f]{64}$ ]] || die 66 "LANE196_APPROVED_LAUNCHER_SHA256 must be exact 64-hex"
+    [[ "$APPROVED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die 64 "LANE198_APPROVED_COMMIT must be exact 40-hex"
+    [[ "$APPROVED_WRAPPER_SHA" =~ ^[0-9a-f]{64}$ ]] || die 65 "LANE198_APPROVED_WRAPPER_SHA256 must be exact 64-hex"
+    [[ "$APPROVED_LAUNCHER_SHA" =~ ^[0-9a-f]{64}$ ]] || die 66 "LANE198_APPROVED_LAUNCHER_SHA256 must be exact 64-hex"
 
     self_source="${BASH_SOURCE[0]}"
     [[ ! -L "$self_source" ]] || die 67 "wrapper invocation path is symlinked"
@@ -174,16 +174,16 @@ self_contract() {
     [[ -f "$LAUNCHER" && ! -L "$LAUNCHER" && -x "$LAUNCHER" ]] || die 71 "launcher is not an executable regular non-symlink file"
 
     if ! head=$("$GIT" -C "$WORKTREE" rev-parse HEAD); then
-        die 72 "Lane196 rev-parse failed"
+        die 72 "Lane198 rev-parse failed"
     fi
-    [[ "$head" == "$APPROVED_COMMIT" ]] || die 73 "Lane196 HEAD does not equal approved commit: $head"
+    [[ "$head" == "$APPROVED_COMMIT" ]] || die 73 "Lane198 HEAD does not equal approved commit: $head"
     if ! "$GIT" -C "$WORKTREE" merge-base --is-ancestor "$BASE190" "$APPROVED_COMMIT"; then
-        die 74 "approved Lane196 commit is not descended from exact Lane190 base"
+        die 74 "approved Lane198 commit is not descended from exact Lane190 base"
     fi
     if ! status=$("$GIT" -C "$WORKTREE" status --porcelain=v1 -uall); then
-        die 75 "Lane196 git status failed"
+        die 75 "Lane198 git status failed"
     fi
-    [[ -z "$status" ]] || die 76 "Lane196 worktree is not clean"
+    [[ -z "$status" ]] || die 76 "Lane198 worktree is not clean"
 
     if ! wrapper_sha=$(sha_file "$SELF_EXPECTED"); then
         die 77 "wrapper SHA256 calculation failed"
@@ -194,10 +194,10 @@ self_contract() {
     [[ "$wrapper_sha" == "$APPROVED_WRAPPER_SHA" ]] || die 79 "runtime wrapper SHA256 differs from approved identity"
     [[ "$launcher_sha" == "$APPROVED_LAUNCHER_SHA" ]] || die 80 "runtime launcher SHA256 differs from approved identity"
 
-    if ! approved_wrapper_blob=$("$GIT" -C "$WORKTREE" rev-parse "$APPROVED_COMMIT:LANE196_BUILD_WRAPPER.sh"); then
+    if ! approved_wrapper_blob=$("$GIT" -C "$WORKTREE" rev-parse "$APPROVED_COMMIT:LANE198_BUILD_WRAPPER.sh"); then
         die 81 "approved wrapper Git blob lookup failed"
     fi
-    if ! approved_launcher_blob=$("$GIT" -C "$WORKTREE" rev-parse "$APPROVED_COMMIT:LANE196_OVERLAY_CXX_LAUNCHER.sh"); then
+    if ! approved_launcher_blob=$("$GIT" -C "$WORKTREE" rev-parse "$APPROVED_COMMIT:LANE198_OVERLAY_CXX_LAUNCHER.sh"); then
         die 82 "approved launcher Git blob lookup failed"
     fi
     if ! runtime_wrapper_blob=$("$GIT" hash-object "$SELF_EXPECTED"); then
@@ -325,7 +325,7 @@ cache_expect() {
 validate_cache() {
     [[ -f "$CACHE_FILE" && ! -L "$CACHE_FILE" ]] || die 119 "generated CMakeCache.txt missing or symlinked"
     safe_new_empty "$CACHE_EVIDENCE"
-    printf 'validator=LANE196_CMAKE_CACHE_V1\nkey\tcache_lhs\tvalue\n' >> "$CACHE_EVIDENCE"
+    printf 'validator=LANE198_CMAKE_CACHE_V1\nkey\tcache_lhs\tvalue\n' >> "$CACHE_EVIDENCE"
     cache_expect ANDROID_ABI arm64-v8a
     cache_expect ANDROID_PLATFORM android-24
     cache_expect ANDROID_PLATFORM_LEVEL 24
@@ -373,14 +373,25 @@ validate_graph() {
     fi
     local rules_file="$BUILD/CMakeFiles/rules.ninja"
     [[ -f "$rules_file" && ! -L "$rules_file" ]] || die 150 "generated CMakeFiles/rules.ninja missing or symlinked"
-    if "$GREP" -Fq -- "-isystem $PREFIX/include" "$NINJA_FILE" || "$GREP" -Fq -- "-I$PREFIX/include" "$NINJA_FILE"; then
-        die 151 "generated build.ninja leaks Termux host include root: $PREFIX/include"
-    fi
-    if "$GREP" -Fq -- "-isystem $PREFIX/include" "$rules_file" || "$GREP" -Fq -- "-I$PREFIX/include" "$rules_file"; then
-        die 152 "generated rules.ninja leaks Termux host include root: $PREFIX/include"
-    fi
+    local grep_rc pattern
+    for pattern in "-isystem $PREFIX/include" "-I$PREFIX/include"; do
+        if "$GREP" -Fq -- "$pattern" "$NINJA_FILE"; then
+            die 151 "generated build.ninja leaks Termux host include root: $PREFIX/include"
+        else
+            grep_rc=$?
+            [[ "$grep_rc" -eq 1 ]] || die 153 "grep inspection error for generated build.ninja rc=$grep_rc pattern=$pattern"
+        fi
+    done
+    for pattern in "-isystem $PREFIX/include" "-I$PREFIX/include"; do
+        if "$GREP" -Fq -- "$pattern" "$rules_file"; then
+            die 152 "generated rules.ninja leaks Termux host include root: $PREFIX/include"
+        else
+            grep_rc=$?
+            [[ "$grep_rc" -eq 1 ]] || die 154 "grep inspection error for generated rules.ninja rc=$grep_rc pattern=$pattern"
+        fi
+    done
     safe_new_empty "$GRAPH_EVIDENCE"
-    printf 'validator=LANE196_NINJA_GRAPH_V2\n%s\nhost_include_root=%s\nhost_include_leak=0\n' "$match" "$PREFIX/include" >> "$GRAPH_EVIDENCE"
+    printf 'validator=LANE198_NINJA_GRAPH_V2\n%s\nhost_include_root=%s\nhost_include_leak=0\n' "$match" "$PREFIX/include" >> "$GRAPH_EVIDENCE"
 }
 
 validate_trace() {
@@ -413,7 +424,7 @@ validate_trace() {
         }
         END {
             if (NR < 1 || count_a < 1 || count_b < 1) exit 57
-            printf "schema=LANE196_OVERLAY_TRACE_V1\nrows=%d\ncellSpurs.cpp_rows=%d\ncellSpursSpu.cpp_rows=%d\n", rows, count_a, count_b
+            printf "schema=LANE198_OVERLAY_TRACE_V1\nrows=%d\ncellSpurs.cpp_rows=%d\ncellSpursSpu.cpp_rows=%d\n", rows, count_a, count_b
         }
     ' "$TRACE"); then
         die 123 "strict overlay trace validation failed"
@@ -422,8 +433,8 @@ validate_trace() {
 }
 
 STAGE="build_path_contract_preflight"
-(( $# == 0 )) || die 147 "wrapper accepts no arguments or build-dir overrides; only pinned v3 build path is permitted"
-[[ "$BUILD" == "$FRESH_BUILD_V3" ]] || die 148 "future build path is not exact pinned v3 path: $BUILD"
+(( $# == 0 )) || die 147 "wrapper accepts no arguments or build-dir overrides; only pinned v4 build path is permitted"
+[[ "$BUILD" == "$FRESH_BUILD_V4" ]] || die 148 "future build path is not exact pinned v4 path: $BUILD"
 [[ "$BUILD" != "$OLD_CONTAMINATED_BUILD" ]] || die 149 "refusing contaminated retired build path: $OLD_CONTAMINATED_BUILD"
 [[ "$BUILD" != "$PRIOR_FRESH_BUILD_V2" ]] || die 150 "refusing prior v2 build path: $PRIOR_FRESH_BUILD_V2"
 
@@ -439,7 +450,7 @@ STAGE="evidence_directory_create"
 if ! run_utc=$("$DATE" -u +%Y%m%dT%H%M%SZ); then
     die 124 "cannot generate unique run UTC"
 fi
-RUN_PREFIX="$HOME_ROOT/.cache/gd-lane196-lane187-canary-libe-${APPROVED_WRAPPER_SHA}-"
+RUN_PREFIX="$HOME_ROOT/.cache/gd-lane198-lane187-canary-libe-${APPROVED_WRAPPER_SHA}-"
 RUN_DIR="${RUN_PREFIX}${run_utc}-$$"
 [[ ! -e "$RUN_DIR" && ! -L "$RUN_DIR" ]] || die 125 "unique evidence directory already exists or is symlinked: $RUN_DIR"
 if ! mkdir -m 700 -- "$RUN_DIR"; then
@@ -474,10 +485,10 @@ RESULT_FILE="$RUN_DIR/result.txt"
 FINAL_STATE="$RUN_DIR/final-state.txt"
 
 safe_new_text "$TRACE" "$TRACE_HEADER"$'\n'
-export LANE196_TRACE_PATH="$TRACE"
-export LANE196_APPROVED_COMMIT="$APPROVED_COMMIT"
-export LANE196_APPROVED_WRAPPER_SHA256="$APPROVED_WRAPPER_SHA"
-export LANE196_APPROVED_LAUNCHER_SHA256="$APPROVED_LAUNCHER_SHA"
+export LANE198_TRACE_PATH="$TRACE"
+export LANE198_APPROVED_COMMIT="$APPROVED_COMMIT"
+export LANE198_APPROVED_WRAPPER_SHA256="$APPROVED_WRAPPER_SHA"
+export LANE198_APPROVED_LAUNCHER_SHA256="$APPROVED_LAUNCHER_SHA"
 
 STAGE="preflight_manifest"
 safe_new_empty "$RUNTIME_IDS"
@@ -527,7 +538,7 @@ safe_new_empty "$COMMANDS"
 
 safe_new_empty "$PRE_MANIFEST"
 {
-    printf 'schema=LANE196_CANARY_LIBE_BUILD_V1\n'
+    printf 'schema=LANE198_CANARY_LIBE_BUILD_V1\n'
     printf 'created_utc=%s\n' "$("$DATE" -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'run_dir=%s\ntrace=%s\nbuild_dir=%s\n' "$RUN_DIR" "$TRACE" "$BUILD"
     printf 'lane187_head=%s\ncellSpurs_sha256=%s\ncellSpursSpu_sha256=%s\n' "$HEAD187" "$SHA_A" "$SHA_B"
