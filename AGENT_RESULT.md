@@ -1,69 +1,38 @@
-# Lane205 — minimal glslangValidator cache-classifier correction
+# Lane206 — independent static review of Lane205 glslangValidator classifier fix
 
 ## Scope and constraints
 
-- Worktree: `/data/data/com.termux/files/home/projects/android/gamedeck-ps3-prod-lanes-20260912/lane205-glslang-validator-fix`
-- Branch verified before mutation: `team/lane205-glslang-validator-fix`.
-- Canonical resource policy read first; this lane performed implementation + static validation only.
-- No CMake configure, compile, Ninja, Gradle, APK/NDK build, GTA run, install, push, merge, cleanup, deletion, or Codex use occurred.
-- The pre-edit `LANE202_BUILD_WRAPPER.sh` was byte-identical to Lane202's wrapper: both SHA256 `a3ff931a0afec83c9403633010dbed59e35d7acc5fa1c05fd016be59a146c5ba`.
+- Worktree: `/data/data/com.termux/files/home/projects/android/gamedeck-ps3-prod-lanes-20260912/lane206-glslang-validator-fix-review`
+- Branch: `team/lane206-glslang-validator-fix-review`
+- Starting/reviewed HEAD verified exactly: `9053cf624e2ac0a6e56ff926cb632b48ff79bb4b`.
+- Reviewed parent: `b144d16ed255a302f302c3654094c5162be80899`.
+- Canonical `TEAM_RESOURCE_POLICY.md` and Lane205's committed report were read before review.
+- Review was static/read-only except this report. No configure, compile, Ninja, Gradle, APK/NDK build, GTA run, install, push, merge, cleanup, deletion, or mutation of v6 or any other worktree/data was performed. No Codex was used.
 
-## Source evidence
+## Disposition
 
-RPCS3 canonical source calls Vulkan discovery at:
+**ACCEPT — Lane205 commit `9053cf624e2ac0a6e56ff926cb632b48ff79bb4b` correctly implements the minimal fail-closed cache-classifier correction specified by Lane204.**
 
-- `.../rpcs3/3rdparty/CMakeLists.txt:188`: `find_package(Vulkan)`.
+This is approval of the static classifier correction only. It is **not** authorization to execute the Lane205 wrapper as a heavyweight attempt. The wrapper remains hard-wired to the Lane202 worktree identity and already-consumed build-v6 path, so a separately implemented and independently reviewed fresh-tree successor (v7) is required before any build.
 
-Installed CMake 4.4 `FindVulkan.cmake` proves `glslangValidator` is host-program metadata, not a target library:
+## 1. Exact executable-code diff
 
-- lines 367-374 append `glslangValidator` to `Vulkan_FIND_COMPONENTS` for backward compatibility even when the caller did not request it explicitly;
-- lines 500-506 call `find_program(Vulkan_GLSLANG_VALIDATOR_EXECUTABLE NAMES glslangValidator ...)`;
-- lines 807-809 create imported executable target `Vulkan::glslangValidator` and set its `IMPORTED_LOCATION` from `Vulkan_GLSLANG_VALIDATOR_EXECUTABLE`.
+`git diff b144d16ed255a302f302c3654094c5162be80899 9053cf624e2ac0a6e56ff926cb632b48ff79bb4b -- LANE202_BUILD_WRAPPER.sh` shows exactly one executable-code change:
 
-The same module separately treats the primary Vulkan library as a library discovery variable (`find_library(Vulkan_LIBRARY ...)`, observed at line 460), so host executable metadata and Android target-library metadata have distinct roles.
-
-Lane204's review identified the exact false-positive mechanism in Lane202: the generic cache classifier marked every `Vulkan_*` key as target dependency metadata. With `CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER`, `find_program()` is intentionally host-rooted, so a legitimate `$PREFIX/bin/glslangValidator` cache value was incorrectly rejected as rc 158 despite not being a target link dependency.
-
-## Minimal implementation
-
-Only the blanket `Vulkan_` alternative was removed from the second broad prefix expression in `validate_cache()`.
-
-Before:
-
-```awk
-key ~ /^(Backtrace_|EXECINFO_|LIBRT$|Vulkan_|ZLIB_|LIBUSB_|pkgcfg_|GAMEDECK_(ICONV|CHARSET)_LIBRARY$)/
+```diff
+- key ~ /^(Backtrace_|EXECINFO_|LIBRT$|Vulkan_|ZLIB_|LIBUSB_|pkgcfg_|GAMEDECK_(ICONV|CHARSET)_LIBRARY$)/)
++ key ~ /^(Backtrace_|EXECINFO_|LIBRT$|ZLIB_|LIBUSB_|pkgcfg_|GAMEDECK_(ICONV|CHARSET)_LIBRARY$)/)
 ```
 
-After (`LANE202_BUILD_WRAPPER.sh:414-415`):
+The blanket `Vulkan_` namespace arm is the only wrapper-code removal. No launcher code changed. The commit also updates `AGENT_RESULT.md`, as expected for Lane205 reporting.
 
-```awk
-target = (key ~ /(^|_)(LIBRARY|LIBRARIES|LIBDIR|LDFLAGS|INCLUDE|INCLUDEDIR|INCLUDE_DIR|INCLUDE_DIRS)($|_)/ ||
-          key ~ /^(Backtrace_|EXECINFO_|LIBRT$|ZLIB_|LIBUSB_|pkgcfg_|GAMEDECK_(ICONV|CHARSET)_LIBRARY$)/)
-```
+This preserves the generic target-role matcher unchanged:
 
-No path allowlist or special-case value exception for `glslangValidator` was added. The correction is semantic/key-role based only.
+`LIBRARY|LIBRARIES|LIBDIR|LDFLAGS|INCLUDE|INCLUDEDIR|INCLUDE_DIR|INCLUDE_DIRS`.
 
-The generic role matcher remains unchanged, so Vulkan keys that are actually libraries, include directories, or linker flags remain target-classified. All other Lane202 gates are untouched because the source diff contains exactly this one classifier-line change.
+## 2. Independent static fixtures
 
-## Preserved fail-closed gates
-
-Static source inspection confirms:
-
-- `LANE202_BUILD_WRAPPER.sh:371` still requires exact `cache_expect Vulkan_LIBRARY "$NDK_SYSROOT/usr/lib/aarch64-linux-android/24/libvulkan.so"`.
-- `LANE202_BUILD_WRAPPER.sh:350` still requires `cache_expect CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER`.
-- configure arguments still contain `-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER` at line 642.
-- generic target roles remain `LIBRARY|LIBRARIES|LIBDIR|LDFLAGS|INCLUDE|INCLUDEDIR|INCLUDE_DIR|INCLUDE_DIRS`.
-- `LIBUSB_` and `pkgcfg_` broad target-prefix gates remain present.
-- `termux_target_allowlist=NONE` evidence remains present.
-- the fresh-tree path rules, source/provenance identities, hashes, graph checks, native-host graph checks, artifact checks, trace checks, and rc semantics were not modified by this lane.
-
-`grep -n 'glslangValidator' LANE202_BUILD_WRAPPER.sh` returned rc 1 with no matches, proving no exact glslangValidator path/name allowlist was introduced into the wrapper.
-
-## Static classifier proof
-
-A synthetic cache matrix was evaluated with the exact post-fix classifier expression from lines 414-415 and `$PREFIX=/data/data/com.termux/files/usr`.
-
-Observed result:
+Using the exact post-fix classifier expression from the committed wrapper with `$PREFIX=/data/data/com.termux/files/usr`, the independent fixture matrix produced:
 
 ```text
 PASS    Vulkan_GLSLANG_VALIDATOR_EXECUTABLE
@@ -75,18 +44,67 @@ REJECT  LIBUSB_LIBRARY
 REJECT  pkgcfg_lib_USB_usb
 ```
 
-This proves the required cases:
+Therefore:
 
-1. `Vulkan_GLSLANG_VALIDATOR_EXECUTABLE=$PREFIX/bin/glslangValidator` is host-program metadata and no longer triggers target rejection.
-2. `Vulkan_LIBRARY=$PREFIX/lib/libvulkan.so` still rejects through the unchanged generic `*_LIBRARY` matcher.
-3. `Vulkan_glslang_LIBRARY=$PREFIX/lib/...` still rejects through the same generic `*_LIBRARY` matcher.
-4. Termux Vulkan include and LDFLAGS records still reject through generic role matching; libusb and pkg-config records still reject through their preserved target-prefix gates.
-5. The exact NDK-sysroot `Vulkan_LIBRARY` cache expectation remains mandatory at line 371.
+- `Vulkan_GLSLANG_VALIDATOR_EXECUTABLE=$PREFIX/bin/glslangValidator` is no longer misclassified as target dependency metadata.
+- `Vulkan_LIBRARY=$PREFIX/lib/libvulkan.so` still rejects.
+- `Vulkan_glslang_LIBRARY=$PREFIX/lib/...` still rejects through the generic `*_LIBRARY` role matcher.
+- Vulkan include and linker-flag records under the Termux prefix still reject.
+- LIBUSB and pkg-config target records under the Termux prefix still reject.
 
-## Diff rationale
+No glslangValidator path allowlist or value exception was introduced.
 
-The former blanket `Vulkan_` test encoded a namespace assumption (all FindVulkan variables are target dependencies) that is false: `FindVulkan.cmake` exposes both host executable metadata and target library/include metadata under the same namespace. Removing only that blanket namespace arm while retaining the role-based matcher corrects the false positive without weakening zero-Termux-target-library policy.
+## 3. Required fail-closed gates remain mandatory
 
-## Result
+Source inspection of the exact Lane205 wrapper confirms:
 
-Lane205 implements only the Lane204-authorized minimal cache-classifier fix. Static evidence shows the host-side glslangValidator cache record now passes while Vulkan/Termux target-library, include, linker-flag, libusb, and pkg-config contamination continues to fail closed. No build or runtime claim is made by this lane.
+- line 350: `cache_expect CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER`
+- line 371: `cache_expect Vulkan_LIBRARY "$NDK_SYSROOT/usr/lib/aarch64-linux-android/24/libvulkan.so"`
+- lines 414-415: the generic target-role matcher remains intact, with only blanket `Vulkan_` removed from the broad prefix classifier
+- line 438: `pkgcfg_` and `LIBUSB_` Termux-prefix rejection remains
+- line 642: configure still passes `-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER`
+
+Thus host-program discovery remains host-rooted while the primary Vulkan target library remains pinned to the exact NDK sysroot.
+
+## 4. Consumed v6 cache, read-only
+
+The consumed v6 cache at `~/.cache/gd-prod-spurs-lane187-canary-build-v6/CMakeCache.txt` was inspected read-only.
+
+Relevant entries are:
+
+```text
+Vulkan_GLSLANG_VALIDATOR_EXECUTABLE:FILEPATH=/data/data/com.termux/files/usr/bin/glslangValidator
+Vulkan_LIBRARY:FILEPATH=/data/data/com.termux/files/home/android-sdk/ndk-r29-local/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/24/libvulkan.so
+```
+
+Applying the corrected Lane205 classifier to the complete consumed v6 cache returned:
+
+```text
+NO_FORBIDDEN_TERMUX_TARGET_DEPENDENCIES
+```
+
+This independently confirms the former rc=158 was the overbroad host-program classification false positive identified by Lane204, while `Vulkan_LIBRARY` remains NDK-rooted. This is static evidence only; v6 remains consumed and must not be reused or mutated.
+
+## 5. Static integrity checks
+
+- `bash -n LANE202_BUILD_WRAPPER.sh` — PASS
+- `git diff --check b144d16ed255a302f302c3654094c5162be80899 9053cf624e2ac0a6e56ff926cb632b48ff79bb4b` — PASS
+- Starting worktree was clean at exact Lane205 commit before this report was written.
+
+## 6. Why Lane205 is not the next runnable heavy wrapper
+
+The committed Lane205 wrapper still contains Lane202-specific runtime identity and consumed-tree wiring:
+
+- `WORKTREE="$HOME_ROOT/projects/android/gamedeck-ps3-prod-lanes-20260912/lane202-coordinator-link-isolation-candidate"`
+- `SELF_EXPECTED="$WORKTREE/LANE202_BUILD_WRAPPER.sh"`
+- `LAUNCHER="$WORKTREE/LANE202_OVERLAY_CXX_LAUNCHER.sh"`
+- `FRESH_BUILD_V6="$HOME_ROOT/.cache/gd-prod-spurs-lane187-canary-build-v6"`
+- the wrapper refuses an existing dedicated build directory
+
+The v6 tree already exists and is consumed evidence. Executing Lane205 directly would therefore violate its own identity/fresh-tree model and is not approved by this review.
+
+## Exact next action
+
+Create a separate **v7 successor implementation lane** that changes only the identity/fresh-build-tree wiring necessary to run the accepted Lane205 classifier correction from a brand-new build directory, while preserving all existing fail-closed provenance, target-isolation, graph, storage, hash, and rc gates. That successor must receive an independent static review that pins its exact commit and script hashes before any single serialized heavyweight configure/compile attempt can be considered.
+
+No runtime, GTA visual/audio, performance, Story Mode, or playability claim is made here.
