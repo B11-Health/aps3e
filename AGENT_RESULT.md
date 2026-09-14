@@ -16,3 +16,6 @@ The resulting `libe.so` must be AArch64, contain exactly one SPUThread overlay t
 
 ## Runtime policy after a separately verified stage
 Do not soak a black screen. Cold launch, allow the normal bikini/SPU/PPU loading phase, then capture only enough `BINK_PUTLLC_CANARY` lines to classify PUTLLC behavior and immediately force-stop the QA package. Analysis/fix happens offline.
+
+## Correction: preserve complete Lane220 SPURS/MFC lineage
+Before build execution, a static lineage audit showed that overlaying only `SPUThread.cpp` on canonical HEAD would drop the production SPURS functional port. The build overlay now substitutes exactly four Lane220 source TUs: `cellSpurs.cpp`, `cellSpursSpu.cpp`, `SPULLVMRecompiler.cpp`, and `SPUThread.cpp`, and supplies the hash-pinned `spurs_live_canary.h`. This preserves v1 task-attribute bridging, compact context storage, the non-perturbing live-MFC observer, and the PUTLLC canary together. No incorrect one-TU core was built or installed.
