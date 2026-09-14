@@ -1,37 +1,42 @@
-# Lane212 — Non-perturbing live SPURS/Bink MFC canary
+# Lane220 — Bink PUTLLC diagnostic canary
 
-## Scope
-Debugger/instrumentation correction only. No build, install, GTA run, asset/config mutation, fence spoof, readiness spoof, fake frame, or guest-visible behavior change was performed.
+## Result
+PASS — source-only, non-semantic diagnostic instrumentation is ready for independent review.
 
-## Runtime evidence motivating this lane
-The 2026-09-13 13:19 debugger run (`~/gamedeck-debugger-runs/20260913-131927-Grand-Theft-Auto-V`) captured the reported bikini -> black failure.
+## Base
+- Base commit: `5c974d060625c6e85b2fbc39d1e0bb15110e625d` (Lane212 non-perturbing live MFC canary).
+- Installed/runtime lineage remains rooted in published Android runtime macro commit `2e217f4618c834ee9d851d1623b810a717c50c9d`.
 
-- Visual luma stayed about 111 through capture t=174.415 s, then fell to 1.775 at t=179.326 s and remained about 1.799 through the black-static trigger.
-- At first black, SurfaceFlinger was still measuring about 30.19 fps; this is not an app/process crash or immediate Android compositor disappearance.
-- Trigger snapshot: SPU[0x0000100]=90.3% CPU; SPU[0x1000100], SPU[0x2000100], SPU[0x3000100]=83.8% each; `rsx::thread`=67.7%.
-- simpleperf resolves RSX activity in `rsx::FIFO::FIFO_control::read`; SPU-side samples include `spu_thread::set_ch_value`, `sys_event_flag_set`, and `spu_thread::do_dma_transfer`.
-- Native observer at the black state shows main PPU 0x01000000 blocked in the observed semaphore wait at CIA 0x01433ce0, producer PPU 0x0100000c repeatedly at CIA 0x00b6d324, observed RSX label72=0 while target=0x61010054, and observed exact GCM control `put=0 get=0 ref=0`.
-- The installed core SHA256 is `1968258bc30ff4ab3dd996494f0047230c393a62c3fb354bee14c69c3ae35286`; it contains the older `SPURS_CANARY phase=CREATE` string but not `SPURS_CANARY_LIVE`, so it cannot answer whether the Bink SPURS 0x1400 context is actually saved/restored correctly at the transition.
+## Why this lane exists
+The authentic post-bikini black-screen run (`20260913-140023-Grand-Theft-Auto-V`) shows Bink SPU `0x03000100` actively spending CPU in LLVM MFC execution, especially `spu_thread::process_mfc_cmd()` and `spu_thread::do_putllc()`. The main PPU simultaneously blocks in `cellSpursQueuePopBody -> sys_event_queue_receive` because the expected SPURS Queue entry never arrives. Existing Lane212 observes ordinary DMA GET/PUT around the Bink/SPURS context but not PUTLLC.
 
-## Lane210 review finding
-Lane210 commit `9201bb6abbd0932fd28de2c00f9f75bfaa63a26a` added the required live context-DMA observation, but it also made `spurs_live_canary::active()` force `optimization_compatible=0` in `spu_thread::do_list_transfer`. Because the canary stays armed after the matching task is created, that changes normal list-DMA execution globally during the relevant period and can perturb timing/performance.
+## Change
+Only `app/src/main/cpp/rpcs3/rpcs3/Emu/Cell/SPUThread.cpp` is changed.
 
-## Lane212 correction
-`SPUThread.cpp` now:
+Inside `spu_thread::do_putllc()`:
+- the existing immediately-invoked result lambda is stored in `putllc_success`;
+- the original lambda body is unchanged;
+- the original success/failure downstream bodies are unchanged;
+- logging is limited to `lv2_id == 0x03000100` (the Bink SPU proven by 64-byte LS/image match);
+- counters are `thread_local` and diagnostic only;
+- log first 16 attempts, then 1/8192 attempts;
+- fields: result, cumulative success/failure, EAL/aligned EA, LSA, tag, cmd, pre-raddr, pre-rtime, post-raddr, guest PC, pre-PC, SPURS address;
+- no guest memory writes, no reservation changes, no altered return values, no retry/notification behavior changes, no hashes or memory copies in the canary path.
 
-1. Restores the original optimization eligibility gate: only existing trace/accurate-DMA/MFC-debug modes disable the list-DMA optimization.
-2. Observes the six-element optimized GET path directly, using the same aligned LS stride and effective EA-derived LS offset as the fast copy path.
-3. Observes the individual optimized GET path before its inline copy.
-4. Observes the individual optimized PUT path before its inline copy.
-5. Leaves the existing `do_dma_transfer` observation intact for non-inline transfers.
-
-The observer remains read-only: it records metadata and hashes source bytes only when a transfer overlaps the armed 0x1400 context. It does not change DMA data, labels, fences, events, readiness, pixels, or guest memory.
-
-## Static validation
+## Static proof
 - `git diff --check`: PASS.
-- Verified `spurs_live_canary::active()` no longer participates in the `optimization_compatible = 0` gate.
-- Verified observation coverage exists in ordinary `do_dma_transfer`, optimized six-element GET, optimized individual GET, and optimized individual PUT paths.
-- No compile/build was run because the shared Android host was under high memory/swap pressure after the diagnostic run; per `TEAM_RESOURCE_POLICY.md`, heavyweight work was not started under that state.
+- Original PUTLLC result-lambda body vs Lane220 named-lambda body:
+  - length: 2451 bytes / 2451 bytes
+  - SHA256 before: `9dabb39ab9ef1f0d65ceecd171f48318c269da4943041ae2d640eb425bbead4e`
+  - SHA256 after:  `9dabb39ab9ef1f0d65ceecd171f48318c269da4943041ae2d640eb425bbead4e`
+  - `BODY_IDENTICAL=True`.
+- Original downstream success/failure body vs Lane220 after condition normalization:
+  - `DOWNSTREAM_IDENTICAL_AFTER_CONDITION_NORMALIZATION=True`.
 
-## Diagnostic disposition
-The current evidence localizes the failure to a live guest graphics/synchronization transition: execution continues, RSX/SPU threads are busy, but the guest command/fence chain is not progressing to visible Rockstar/loading content. The next discriminating runtime datum is the exact sequence and hashes of GET/PUT operations overlapping the Bink SPURS 0x1400 task context around the transition, captured with this non-perturbing canary.
+## Important negative findings that constrain interpretation
+- LLVM `MFC_WrTagUpdate` already has correct tag-status update semantics and matches current official RPCS3; do not patch TagStat/TagUpdate.
+- `spu_thread::do_putllc()` and `spu_thread::process_mfc_cmd()` match official RPCS3 source (except whitespace in one comment); this lane is diagnostic only, not a proposed functional fix.
+- Lane216 was foreground-contaminated by Chrome and must not be used as proof of a global SPU freeze.
+
+## Runtime acceptance for this canary
+After independent review and a cloud-built diagnostic core, capture `BINK_PUTLLC_CANARY` during one authentic post-bikini run. The goal is to identify the repeated EA/cache line and success/failure ratio; the canary itself is not a playability fix and must not be treated as success.

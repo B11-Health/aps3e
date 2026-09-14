@@ -3460,7 +3460,12 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 	// Store conditionally
 	const u32 addr = args.eal & -128;
 
-	if ([&]()
+	const bool bink_putllc_canary = lv2_id == 0x03000100;
+	const u32 bink_pre_raddr = bink_putllc_canary ? raddr : 0;
+	const u64 bink_pre_rtime = bink_putllc_canary ? rtime : 0;
+	const u32 bink_pre_pc = bink_putllc_canary ? pc : 0;
+
+	const bool putllc_success = [&]()
 	{
 		perf_meter<"PUTLLC."_u64> perf2 = perf0;
 
@@ -3570,7 +3575,35 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 
 		res += success ? 64 : 0 - 64;
 		return success;
-	}())
+	}();
+
+	if (bink_putllc_canary)
+	{
+		static thread_local u64 s_bink_putllc_seq = 0;
+		static thread_local u64 s_bink_putllc_ok = 0;
+		static thread_local u64 s_bink_putllc_fail = 0;
+		const u64 seq = ++s_bink_putllc_seq;
+
+		if (putllc_success)
+		{
+			s_bink_putllc_ok++;
+		}
+		else
+		{
+			s_bink_putllc_fail++;
+		}
+
+		if (seq <= 16 || !(seq & 0x1fff))
+		{
+			spu_log.notice("BINK_PUTLLC_CANARY seq=%llu result=%s ok=%llu fail=%llu eal=0x%x addr=0x%x lsa=0x%x tag=%u cmd=0x%x pre_raddr=0x%x pre_rtime=0x%llx post_raddr=0x%x pc=0x%x pre_pc=0x%x spurs=0x%x",
+				static_cast<unsigned long long>(seq), putllc_success ? "OK" : "FAIL",
+				static_cast<unsigned long long>(s_bink_putllc_ok), static_cast<unsigned long long>(s_bink_putllc_fail),
+				args.eal, addr, args.lsa & 0x3ffff, args.tag, static_cast<u32>(args.cmd), bink_pre_raddr,
+				static_cast<unsigned long long>(bink_pre_rtime), raddr, pc, bink_pre_pc, spurs_addr);
+		}
+	}
+
+	if (putllc_success)
 	{
 		if (raddr)
 		{
