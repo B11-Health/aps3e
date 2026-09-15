@@ -301,6 +301,13 @@ Function* PPUTranslator::Translate(const ppu_function& info)
 
 			const u32 op = *ensure(m_info.get_ptr<u32>(::narrow<u32>(m_addr + base)));
 
+#if defined(__ANDROID__)
+			if (!m_reloc && (m_addr == 0x0180f228u || m_addr == 0x00915664u || m_addr == 0x00915798u || m_addr == 0x00918420u))
+			{
+				Call(GetType<void>(), "__bink_postbikini", m_thread, GetAddr(), GetGpr(3), GetGpr(4), GetGpr(5), GetGpr(28), GetGpr(29), GetGpr(30), GetGpr(31));
+			}
+#endif
+
 			(this->*(s_ppu_decoder.decode(op)))({op});
 
 			if (m_rel)

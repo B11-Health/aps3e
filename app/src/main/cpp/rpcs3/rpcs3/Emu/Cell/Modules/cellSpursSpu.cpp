@@ -3,11 +3,14 @@
 
 #include "Emu/Memory/vm_reservation.h"
 #include "Emu/Cell/SPUThread.h"
+#include "Emu/Cell/postbikini_probe.h"
 #include "Emu/Cell/SPURecompiler.h"
 #include "cellSpurs.h"
 #include "Crypto/utils.h"
 
+#include <algorithm>
 #include <atomic>
+#include <string_view>
 
 #include "util/asm.hpp"
 #include "util/v128.hpp"
@@ -2387,6 +2390,31 @@ s32 spursTasksetLoadElf(spu_thread& spu, u32* entryPoint, u32* lowestLoadAddr, u
 
 	*entryPoint = obj.header.e_entry;
 	if (lowestLoadAddr) *lowestLoadAddr = _lowestLoadAddr;
+
+#if defined(__ANDROID__)
+	static constexpr std::string_view bink_spu_name = "binkspu_task.elf";
+	bool bink_note = false;
+	for (const auto& shdr : obj.shdrs)
+	{
+		if (shdr.sh_type != sec_type::sht_note)
+		{
+			continue;
+		}
+		const auto data = shdr.get_bin();
+		bink_note = std::search(data.begin(), data.end(), bink_spu_name.begin(), bink_spu_name.end(),
+			[](u8 lhs, char rhs) { return lhs == static_cast<u8>(rhs); }) != data.end();
+		if (bink_note)
+		{
+			break;
+		}
+	}
+	if (bink_note)
+	{
+		const auto ctxt = spu._ptr<SpursTasksetContext>(0x2700);
+		postbikini_probe::identify_bink_spu(spu.lv2_id, ctxt->taskset.addr(), ctxt->taskId,
+			static_cast<u32>(elfAddr), *entryPoint);
+	}
+#endif
 
 	return CELL_OK;
 }

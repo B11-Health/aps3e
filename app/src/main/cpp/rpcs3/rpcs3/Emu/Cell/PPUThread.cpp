@@ -3,6 +3,7 @@
 #include "Utilities/StrUtil.h"
 #include "util/serialization.hpp"
 #include "Crypto/sha1.h"
+#include "Crypto/utils.h"
 #include "Crypto/unself.h"
 #include "Loader/ELF.h"
 #include "Loader/mself.hpp"
@@ -17,6 +18,7 @@
 #include "Emu/System.h"
 #include "Emu/GameDeckTrace.h"
 #include "PPUThread.h"
+#include "postbikini_probe.h"
 #include "PPUInterpreter.h"
 #include "PPUAnalyser.h"
 #include "PPUModule.h"
@@ -58,6 +60,7 @@
 #include <cctype>
 #include <span>
 #include <optional>
+#include <mutex>
 #include <charconv>
 
 #include "util/asm.hpp"
@@ -2987,6 +2990,481 @@ void ppu_thread::stack_pop_verbose(u32 addr, u32 size) noexcept
 
 extern ppu_intrp_func_t ppu_get_syscall(u64 code);
 
+#if defined(__ANDROID__)
+namespace postbikini_probe
+{
+	namespace
+	{
+		constexpr u32 worker_block(u32 worker)
+		{
+			return 0x01e63b00u + worker * 0x100u;
+		}
+
+		constexpr u32 worker_cursor(u32 worker)
+		{
+			return 0x01e64100u + worker * 4u;
+		}
+
+		constexpr std::array<const char*, 3> s_plane_names{"Y", "U", "V"};
+
+		struct identity_state
+		{
+			bool valid = false;
+			bool ambiguous = false;
+			u32 lv2_id = 0;
+			u64 taskset = 0;
+			u32 task = 0;
+			u32 elf_addr = 0;
+			u32 entry = 0;
+		};
+
+		struct worker_state
+		{
+			u32 producer = 0;
+			u32 cursor = 0;
+			u32 wait_cursor = 0;
+			u32 wait_producer = 0;
+			u32 wait_ppu = 0;
+			bool wait_active = false;
+			bool published = false;
+			bool consumed = false;
+		};
+
+		struct active_state
+		{
+			bool active = false;
+			bool invalid = false;
+			u64 txn = 0;
+			u32 bink_lv2 = 0;
+			u32 handle = 0;
+			u32 object = 0;
+			u32 slot = 0;
+			std::array<plane_snapshot, 3> planes{};
+			std::array<worker_state, 2> workers{};
+		};
+
+		std::mutex s_probe_mutex;
+		identity_state s_identity;
+		active_state s_active;
+		completed_snapshot s_completed;
+		std::array<bool, 3> s_rsx_seen{};
+		bool s_completed_valid = false;
+		bool s_started_once = false;
+		u64 s_next_txn = 0;
+
+		bool read_u32(u32 addr, u32& out)
+		{
+			if (!addr || !vm::check_addr(addr, vm::page_readable, sizeof(u32)))
+			{
+				return false;
+			}
+
+			out = vm::read32(addr);
+			return true;
+		}
+
+		bool snapshot_plane(plane_snapshot& plane)
+		{
+			if (!plane.ea || !plane.size || plane.size > 0x200000u ||
+				!vm::check_addr(plane.ea, vm::page_readable, plane.size))
+			{
+				return false;
+			}
+
+			const auto* data = static_cast<const u8*>(vm::base(plane.ea));
+			plane.nonzero = 0;
+			for (u32 i = 0; i < plane.size; i++)
+			{
+				plane.nonzero += data[i] != 0;
+			}
+			plane.sha256 = sha256_get_hash(reinterpret_cast<const char*>(data), plane.size, true);
+			return !plane.sha256.empty();
+		}
+
+		bool resolve_planes(u32 object, u32 handle, u32& slot, std::array<plane_snapshot, 3>& planes)
+		{
+			u32 object_handle = 0;
+			u32 framebuffer = 0;
+			u32 descriptors = 0;
+			if (!read_u32(object, object_handle) || object_handle != handle ||
+				!read_u32(object + 0x04u, framebuffer) ||
+				!read_u32(object + 0x18u, descriptors) || !framebuffer || !descriptors ||
+				!read_u32(framebuffer + 0x14u, slot))
+			{
+				return false;
+			}
+
+			const u64 desc64 = static_cast<u64>(descriptors) + static_cast<u64>(slot) * 0x80ull;
+			if (desc64 > u32{umax} || !vm::check_addr(static_cast<u32>(desc64), vm::page_readable, 0x60u))
+			{
+				return false;
+			}
+
+			for (u32 i = 0; i < planes.size(); i++)
+			{
+				const u32 desc = static_cast<u32>(desc64) + i * 0x20u;
+				u32 ea = 0;
+				u32 pitch = 0;
+				u32 height = 0;
+				if (!read_u32(desc + 0x04u, ea) || !read_u32(desc + 0x08u, pitch) || !read_u32(desc + 0x14u, height))
+				{
+					return false;
+				}
+
+				const u64 size64 = static_cast<u64>(pitch) * height;
+				if (!ea || !pitch || !height || !size64 || size64 > 0x200000ull ||
+					!vm::check_addr(ea, vm::page_readable, static_cast<u32>(size64)))
+				{
+					return false;
+				}
+
+				planes[i].ea = ea;
+				planes[i].size = static_cast<u32>(size64);
+				planes[i].pitch = pitch;
+				planes[i].height = height;
+				planes[i].nonzero = 0;
+				planes[i].sha256.clear();
+			}
+
+			return true;
+		}
+
+		bool same_plane_layout(const std::array<plane_snapshot, 3>& lhs, const std::array<plane_snapshot, 3>& rhs)
+		{
+			for (u32 i = 0; i < lhs.size(); i++)
+			{
+				if (lhs[i].ea != rhs[i].ea || lhs[i].size != rhs[i].size ||
+					lhs[i].pitch != rhs[i].pitch || lhs[i].height != rhs[i].height)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		void reject_locked(const char* reason, u32 pc)
+		{
+			if (!s_active.active || s_active.invalid)
+			{
+				return;
+			}
+
+			s_active.invalid = true;
+			ppu_log.error("BINK_ASYNC_TXN_REJECT txn=%llu bink=0x%08x pc=0x%08x reason=%s",
+				static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, pc, reason);
+		}
+
+		bool refresh_planes_locked(const char* phase, u32 worker)
+		{
+			u32 slot = 0;
+			std::array<plane_snapshot, 3> current{};
+			if (!resolve_planes(s_active.object, s_active.handle, slot, current) ||
+				slot != s_active.slot || !same_plane_layout(current, s_active.planes))
+			{
+				reject_locked("plane_layout_changed", 0);
+				return false;
+			}
+
+			// Emit no plane record unless all three live planes were readable and
+			// hashed successfully for this exact transaction and layout.
+			for (auto& plane : current)
+			{
+				if (!snapshot_plane(plane))
+				{
+					reject_locked("plane_snapshot_failed", 0);
+					return false;
+				}
+			}
+
+			s_active.planes = current;
+			for (u32 i = 0; i < current.size(); i++)
+			{
+				ppu_log.notice("BINK_ASYNC_TXN_PLANE txn=%llu bink=0x%08x lv2=0x%08x worker=%u lane=worker%u phase=%s plane=%s ea=0x%08x pitch=0x%x height=0x%x size=0x%x valid=1 zeros=%llu nonzero=%llu hash=%s",
+					static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, worker, worker, phase, s_plane_names[i],
+					current[i].ea, current[i].pitch, current[i].height, current[i].size,
+					static_cast<unsigned long long>(current[i].size - current[i].nonzero), static_cast<unsigned long long>(current[i].nonzero), current[i].sha256);
+			}
+			return true;
+		}
+
+		bool resolve_launch_object(u32 handle, const std::array<u64, 4>& candidates, u32& object)
+		{
+			object = 0;
+			for (const u64 raw : candidates)
+			{
+				const u32 candidate = static_cast<u32>(raw);
+				u32 candidate_handle = 0;
+				if (!candidate || !read_u32(candidate, candidate_handle) || candidate_handle != handle)
+				{
+					continue;
+				}
+				if (object && object != candidate)
+				{
+					return false;
+				}
+				object = candidate;
+			}
+			return object != 0;
+		}
+	}
+
+	void identify_bink_spu(u32 lv2_id, u64 taskset, u32 task, u32 elf_addr, u32 entry)
+	{
+		std::lock_guard lock(s_probe_mutex);
+		if (!lv2_id || s_identity.ambiguous || Emu.GetTitleID() != "BLUS31156" || Emu.GetAppVersion() != "01.06")
+		{
+			return;
+		}
+
+		if (!s_identity.valid)
+		{
+			s_identity = {true, false, lv2_id, taskset, task, elf_addr, entry};
+			ppu_log.notice("BINK_IDENTITY title=BLUS31156 app=01.06 lv2=0x%08x proof=qa-equivalent identitySource=spu_note name=binkspu_task.elf taskset=0x%llx task=%u elf=0x%08x entry=0x%08x",
+				lv2_id, static_cast<unsigned long long>(taskset), task, elf_addr, entry);
+			return;
+		}
+
+		if (s_identity.lv2_id != lv2_id)
+		{
+			s_identity.ambiguous = true;
+			s_completed_valid = false;
+			if (s_active.active && !s_active.invalid)
+			{
+				s_active.invalid = true;
+				ppu_log.error("BINK_ASYNC_TXN_REJECT txn=%llu bink=0x%08x pc=0x00000000 reason=bink_identity_ambiguous",
+					static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2);
+			}
+			ppu_log.error("BINK_IDENTITY_AMBIGUOUS lv2=0x%08x proof=qa-equivalent identitySource=spu_note first=0x%08x second=0x%08x", lv2_id, s_identity.lv2_id, lv2_id);
+		}
+	}
+
+	bool read_completed(completed_snapshot& out)
+	{
+		std::lock_guard lock(s_probe_mutex);
+		if (!s_completed_valid || s_identity.ambiguous)
+		{
+			return false;
+		}
+		out = s_completed;
+		return true;
+	}
+
+	bool mark_rsx_source(u64 txn, u32 plane_index, u32 source_ea)
+	{
+		std::lock_guard lock(s_probe_mutex);
+		if (!s_completed_valid || s_completed.txn != txn || plane_index >= s_completed.planes.size() ||
+			s_completed.planes[plane_index].ea != source_ea || s_rsx_seen[plane_index])
+		{
+			return false;
+		}
+		s_rsx_seen[plane_index] = true;
+		return true;
+	}
+
+	void observe_ppu(ppu_thread& ppu, u64 addr, u64 r3, u64 r4, u64 r5, u64 r28, u64 r29, u64 r30, u64 r31)
+	{
+		std::lock_guard lock(s_probe_mutex);
+		const u32 pc = static_cast<u32>(addr);
+
+		if (pc == 0x0180f228u)
+		{
+			if (s_started_once || !s_identity.valid || s_identity.ambiguous || static_cast<u32>(r3) == 0 ||
+				static_cast<u32>(r4) != 1u || static_cast<u32>(r5) != 2u)
+			{
+				return;
+			}
+
+			active_state candidate{};
+			candidate.txn = ++s_next_txn;
+			candidate.bink_lv2 = s_identity.lv2_id;
+			candidate.handle = static_cast<u32>(r3);
+			if (!resolve_launch_object(candidate.handle, {r28, r29, r30, r31}, candidate.object) ||
+				!resolve_planes(candidate.object, candidate.handle, candidate.slot, candidate.planes))
+			{
+				return;
+			}
+
+			for (u32 i = 0; i < candidate.workers.size(); i++)
+			{
+				const u32 worker = i + 1u;
+				if (!read_u32(worker_block(worker) + 0x80u, candidate.workers[i].producer) ||
+					!read_u32(worker_cursor(worker), candidate.workers[i].cursor) ||
+					candidate.workers[i].producer != candidate.workers[i].cursor)
+				{
+					return;
+				}
+			}
+
+			candidate.active = true;
+			s_active = std::move(candidate);
+			s_started_once = true;
+			ppu_log.notice("BINK_ASYNC_TXN_BEGIN txn=%llu bink=0x%08x lv2=0x%08x handle=0x%08x object=0x%08x slot=%u prod1=0x%x cur1=0x%x prod2=0x%x cur2=0x%x Y=0x%08x U=0x%08x V=0x%08x",
+				static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, s_active.handle, s_active.object, s_active.slot,
+				s_active.workers[0].producer, s_active.workers[0].cursor, s_active.workers[1].producer, s_active.workers[1].cursor,
+				s_active.planes[0].ea, s_active.planes[1].ea, s_active.planes[2].ea);
+			return;
+		}
+
+		if (!s_active.active || s_active.invalid)
+		{
+			return;
+		}
+
+		if (pc == 0x00915664u)
+		{
+			const u32 worker = static_cast<u32>(r3);
+			if (worker < 1u || worker > 2u)
+			{
+				return;
+			}
+			auto& state = s_active.workers[worker - 1u];
+			u32 producer = 0;
+			u32 cursor = 0;
+			if (!read_u32(worker_block(worker) + 0x80u, producer) || !read_u32(worker_cursor(worker), cursor))
+			{
+				reject_locked("cursor_read_failed", pc);
+				return;
+			}
+			if (state.wait_active)
+			{
+				reject_locked("nested_consumer_wait", pc);
+				return;
+			}
+			if (producer != state.producer)
+			{
+				if (producer != state.producer + 2u || cursor != state.cursor || state.published)
+				{
+					reject_locked("producer_not_single_forward_step", pc);
+					return;
+				}
+				const u32 before = state.producer;
+				state.producer = producer;
+				state.published = true;
+				ppu_log.notice("BINK_ASYNC_TXN_RESULT_PUBLISH txn=%llu bink=0x%08x lv2=0x%08x worker=%u workerBase=0x%08x cursorEa=0x%08x producerBefore=0x%x producerAfter=0x%x consumer=0x%x",
+					static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, worker, worker_block(worker), worker_cursor(worker), before, producer, cursor);
+			}
+			else if (cursor != state.cursor)
+			{
+				reject_locked("consumer_moved_without_observed_publish", pc);
+				return;
+			}
+
+			state.wait_active = true;
+			state.wait_cursor = cursor;
+			state.wait_producer = producer;
+			state.wait_ppu = ppu.id;
+			return;
+		}
+
+		if (pc == 0x00915798u)
+		{
+			worker_state* state = nullptr;
+			u32 worker = 0;
+			for (u32 i = 0; i < s_active.workers.size(); i++)
+			{
+				if (s_active.workers[i].wait_active && s_active.workers[i].wait_ppu == ppu.id)
+				{
+					if (state)
+					{
+						reject_locked("ambiguous_consumer_return", pc);
+						return;
+					}
+					state = &s_active.workers[i];
+					worker = i + 1u;
+				}
+			}
+			if (!state)
+			{
+				return;
+			}
+
+			u32 producer = 0;
+			u32 cursor = 0;
+			if (!read_u32(worker_block(worker) + 0x80u, producer) || !read_u32(worker_cursor(worker), cursor))
+			{
+				reject_locked("consumer_return_read_failed", pc);
+				return;
+			}
+
+			// The helper may enter before the SPU publishes and return after it has
+			// both observed and consumed that result. Re-read the producer here so
+			// that a publication occurring inside the wait is not lost.
+			if (producer != state->producer)
+			{
+				if (state->published || producer != state->producer + 2u)
+				{
+					reject_locked("producer_not_single_forward_step_on_return", pc);
+					return;
+				}
+				const u32 before = state->producer;
+				state->producer = producer;
+				state->published = true;
+				ppu_log.notice("BINK_ASYNC_TXN_RESULT_PUBLISH txn=%llu bink=0x%08x lv2=0x%08x worker=%u workerBase=0x%08x cursorEa=0x%08x producerBefore=0x%x producerAfter=0x%x consumer=0x%x observedAt=consumer_return",
+					static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, worker, worker_block(worker), worker_cursor(worker), before, producer, cursor);
+			}
+
+			const u32 result = static_cast<u32>(r3);
+			if (result == 1u)
+			{
+				if (!state->published || state->consumed || cursor != state->wait_cursor + 2u || cursor != producer)
+				{
+					reject_locked("consumer_not_single_forward_step", pc);
+					return;
+				}
+				ppu_log.notice("BINK_ASYNC_TXN_RESULT_CONSUMED txn=%llu bink=0x%08x lv2=0x%08x worker=%u workerBase=0x%08x cursorEa=0x%08x cursorBefore=0x%x cursorAfter=0x%x producer=0x%x result=1",
+					static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, worker, worker_block(worker), worker_cursor(worker), state->wait_cursor, cursor, producer);
+				state->cursor = cursor;
+				state->consumed = true;
+			}
+			else if (result == 0u)
+			{
+				if (cursor != state->wait_cursor)
+				{
+					reject_locked("consumer_moved_on_zero_return", pc);
+					return;
+				}
+			}
+			else
+			{
+				reject_locked("unexpected_consumer_return", pc);
+				return;
+			}
+			state->wait_active = false;
+			return;
+		}
+
+		if (pc == 0x00918420u && static_cast<u32>(r3) != 0u)
+		{
+			if (static_cast<u32>(r3) != 1u || !s_active.workers[0].consumed || !s_active.workers[1].consumed)
+			{
+				reject_locked("frame_complete_without_both_consumers", pc);
+				return;
+			}
+			if (!refresh_planes_locked("frame_complete", 0u))
+			{
+				return;
+			}
+
+			s_completed.txn = s_active.txn;
+			s_completed.bink_lv2 = s_active.bink_lv2;
+			s_completed.handle = s_active.handle;
+			s_completed.slot = s_active.slot;
+			s_completed.planes = s_active.planes;
+			s_rsx_seen = {};
+			s_completed_valid = true;
+			s_active.active = false;
+			ppu_log.notice("BINK_ASYNC_TXN_FRAME_COMPLETE txn=%llu bink=0x%08x lv2=0x%08x handle=0x%08x slot=%u",
+				static_cast<unsigned long long>(s_completed.txn), s_completed.bink_lv2, s_completed.bink_lv2, s_completed.handle, s_completed.slot);
+		}
+	}
+}
+
+static void ppu_bink_postbikini(ppu_thread& ppu, u64 addr, u64 r3, u64 r4, u64 r5, u64 r28, u64 r29, u64 r30, u64 r31)
+{
+	postbikini_probe::observe_ppu(ppu, addr, r3, r4, r5, r28, r29, r30, r31);
+}
+#endif
+
 void ppu_trap(ppu_thread& ppu, u64 addr)
 {
 	ensure((addr & (~u64{0xffff'ffff} | 0x3)) == 0);
@@ -4567,6 +5045,9 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 			{ "__trap", reinterpret_cast<u64>(&ppu_trap) },
 			{ "__error", reinterpret_cast<u64>(&ppu_error) },
 			{ "__check", reinterpret_cast<u64>(&ppu_check) },
+#if defined(__ANDROID__)
+			{ "__bink_postbikini", reinterpret_cast<u64>(&ppu_bink_postbikini) },
+#endif
 			{ "__trace", reinterpret_cast<u64>(&ppu_trace) },
 			{ "__syscall", reinterpret_cast<u64>(ppu_execute_syscall) },
 			{ "__get_tb", reinterpret_cast<u64>(get_timebased_time) },

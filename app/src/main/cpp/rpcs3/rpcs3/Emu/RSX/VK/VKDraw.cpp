@@ -2,6 +2,9 @@
 #include "../Common/BufferUtils.h"
 #include "../Program/GLSLCommon.h"
 #include "../rsx_methods.h"
+#include "Crypto/utils.h"
+#include "Emu/Cell/postbikini_probe.h"
+#include "Emu/Memory/vm.h"
 
 #include "VKAsyncScheduler.h"
 #include "VKGSRender.h"
@@ -10,6 +13,42 @@
 #include <vulkan/vulkan_core.h>
 
 extern bool cfg_vertex_buffer_upload_mode_use_buffer_view();
+
+#if defined(__ANDROID__)
+namespace
+{
+	void observe_bink_rsx_source(u32 source_ea, u32 texture_index, const char* stage)
+	{
+		postbikini_probe::completed_snapshot snapshot{};
+		if (!postbikini_probe::read_completed(snapshot))
+		{
+			return;
+		}
+
+		static constexpr std::array<const char*, 3> plane_names{"Y", "U", "V"};
+		for (u32 i = 0; i < snapshot.planes.size(); i++)
+		{
+			const auto& plane = snapshot.planes[i];
+			if (source_ea != plane.ea || !plane.size || plane.sha256.empty() ||
+				!vm::check_addr(source_ea, vm::page_readable, plane.size))
+			{
+				continue;
+			}
+
+			const auto* data = static_cast<const u8*>(vm::base(source_ea));
+			const std::string source_hash = sha256_get_hash(reinterpret_cast<const char*>(data), plane.size, true);
+			if (source_hash != plane.sha256 || !postbikini_probe::mark_rsx_source(snapshot.txn, i, source_ea))
+			{
+				continue;
+			}
+
+			rsx_log.notice("BINK_RSX_SOURCE txn=%llu bink=0x%08x lv2=0x%08x plane=%s stage=%s event=TEXTURE_UPLOAD texture=%u sourceEa=0x%08x planeEa=0x%08x size=0x%x publishSha256=%s sourceSha256=%s direct=1 proven=YES status=ok",
+				static_cast<unsigned long long>(snapshot.txn), snapshot.bink_lv2, snapshot.bink_lv2, plane_names[i], stage, texture_index,
+				source_ea, plane.ea, plane.size, plane.sha256, source_hash);
+		}
+	}
+}
+#endif
 
 namespace vk
 {
@@ -323,6 +362,10 @@ void VKGSRender::load_texture_env()
 			continue;
 		}
 
+#if defined(__ANDROID__)
+		observe_bink_rsx_source(rsx::get_address(tex.offset(), tex.location()), i, "fragment");
+#endif
+
 		if (sampler_state->is_cyclic_reference)
 		{
 			check_for_cyclic_refs |= true;
@@ -559,6 +602,10 @@ void VKGSRender::load_texture_env()
 		{
 			continue;
 		}
+
+#if defined(__ANDROID__)
+		observe_bink_rsx_source(rsx::get_address(tex.offset(), tex.location()), i, "vertex");
+#endif
 
 		if (sampler_state->is_cyclic_reference || sampler_state->external_subresource_desc.do_not_cache)
 		{
