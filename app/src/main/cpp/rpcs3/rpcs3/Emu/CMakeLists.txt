@@ -394,7 +394,7 @@ target_sources(rpcs3_emu PRIVATE
     CPU/CPUTranslator.cpp
 )
 
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|arm64|aarch64")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|arm64|aarch64" OR (ANDROID AND (CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "arm64-v8a")))
     target_sources(rpcs3_emu PRIVATE
         CPU/Backends/AArch64/AArch64ASM.cpp
         CPU/Backends/AArch64/AArch64Common.cpp
