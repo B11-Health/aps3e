@@ -19,6 +19,7 @@ namespace postbikini_probe
 
 	struct completed_snapshot
 	{
+		u64 run = 0;
 		u64 txn = 0;
 		u32 bink_lv2 = 0;
 		u32 handle = 0;

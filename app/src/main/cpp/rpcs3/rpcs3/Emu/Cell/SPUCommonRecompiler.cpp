@@ -937,6 +937,41 @@ void spu_cache::initialize(bool build_existing_cache)
 		}
 	}
 
+#if defined(__ANDROID__) && defined(ARCH_ARM64)
+	// GTA V on GameDeck can accumulate a large valid SPU disk cache. Recompiling every
+	// cached program here blocks fresh boot behind the startup-wide SPU Worker join before
+	// any real guest SPU thread can execute. Preserve the disk cache and seed the runtime
+	// with known-but-uncompiled entries instead; the normal dispatcher then compiles only
+	// blocks GTA actually executes. Marking them cached avoids duplicate disk appends.
+	const bool gamedeck_lazy_gta_spu_cache = build_existing_cache
+		&& Emu.GetTitleID() == "BLUS31156"
+		&& g_cfg.core.spu_decoder == spu_decoder_type::llvm
+		&& g_cfg.core.spu_cache
+		&& !g_cfg.core.llvm_precompilation
+		&& !func_list.empty();
+
+	if (gamedeck_lazy_gta_spu_cache)
+	{
+		auto& runtime = g_fxo->get<spu_runtime>();
+		u32 seeded = 0;
+
+		for (const auto& func : func_list)
+		{
+			if (auto* item = runtime.add_empty(spu_program{func}))
+			{
+				item->cached = 1;
+				seeded++;
+			}
+		}
+
+		g_fxo->get<spu_cache>() = std::move(cache);
+		gamedeck_trace::emit("spu_cache_lazy_ready", "functions=%llu\tseeded=%u",
+			static_cast<unsigned long long>(func_list.size()), seeded);
+		spu_log.notice("SPU Runtime: Deferred eager compilation of %u cached GTA V SPU programs on Android ARM64.", seeded);
+		return;
+	}
+#endif
+
 	u32 worker_count = 0;
 
 	std::optional<scoped_progress_dialog> progress_dialog;

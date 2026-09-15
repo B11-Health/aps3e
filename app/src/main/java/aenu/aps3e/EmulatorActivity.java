@@ -278,8 +278,13 @@ public class EmulatorActivity extends AppCompatActivity {
 
 	@Override
 	protected void onDestroy() {
+		// Activity destruction is a lifecycle event, not a process-termination signal.
+		// The explicit close path already calls Emulator.get.quit() before finish().
+		// Killing :ps3 here made benign Activity teardown/recreation look like a clean
+		// emulator exit and could terminate an otherwise live GTA session.
+		Log.i("GameDeckPs3Lifecycle", "onDestroy finishing=" + isFinishing()
+				+ " changingConfigurations=" + isChangingConfigurations());
 		super.onDestroy();
-		System.exit(0);
 	}
 
 	public static class DialogFragment extends androidx.fragment.app.DialogFragment{

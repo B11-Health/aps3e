@@ -42,8 +42,8 @@ namespace
 				continue;
 			}
 
-			rsx_log.notice("BINK_RSX_SOURCE txn=%llu bink=0x%08x lv2=0x%08x plane=%s stage=%s event=TEXTURE_UPLOAD texture=%u sourceEa=0x%08x planeEa=0x%08x size=0x%x publishSha256=%s sourceSha256=%s direct=1 proven=YES status=ok",
-				static_cast<unsigned long long>(snapshot.txn), snapshot.bink_lv2, snapshot.bink_lv2, plane_names[i], stage, texture_index,
+			rsx_log.notice("BINK_RSX_SOURCE run=0x%016llx txn=%llu bink=0x%08x lv2=0x%08x plane=%s stage=%s event=TEXTURE_UPLOAD texture=%u sourceEa=0x%08x planeEa=0x%08x size=0x%x publishSha256=%s sourceSha256=%s direct=1 proven=YES status=ok",
+				static_cast<unsigned long long>(snapshot.run), static_cast<unsigned long long>(snapshot.txn), snapshot.bink_lv2, snapshot.bink_lv2, plane_names[i], stage, texture_index,
 				source_ea, plane.ea, plane.size, plane.sha256, source_hash);
 		}
 	}

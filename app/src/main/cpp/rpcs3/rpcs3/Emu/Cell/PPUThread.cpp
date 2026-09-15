@@ -3011,6 +3011,7 @@ namespace postbikini_probe
 		{
 			bool valid = false;
 			bool ambiguous = false;
+			u64 run = 0;
 			u32 lv2_id = 0;
 			u64 taskset = 0;
 			u32 task = 0;
@@ -3034,6 +3035,7 @@ namespace postbikini_probe
 		{
 			bool active = false;
 			bool invalid = false;
+			u64 run = 0;
 			u64 txn = 0;
 			u32 bink_lv2 = 0;
 			u32 handle = 0;
@@ -3150,8 +3152,8 @@ namespace postbikini_probe
 			}
 
 			s_active.invalid = true;
-			ppu_log.error("BINK_ASYNC_TXN_REJECT txn=%llu bink=0x%08x pc=0x%08x reason=%s",
-				static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, pc, reason);
+			ppu_log.error("BINK_ASYNC_TXN_REJECT run=0x%016llx txn=%llu bink=0x%08x lv2=0x%08x pc=0x%08x reason=%s",
+				static_cast<unsigned long long>(s_active.run), static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, pc, reason);
 		}
 
 		bool refresh_planes_locked(const char* phase, u32 worker)
@@ -3179,8 +3181,8 @@ namespace postbikini_probe
 			s_active.planes = current;
 			for (u32 i = 0; i < current.size(); i++)
 			{
-				ppu_log.notice("BINK_ASYNC_TXN_PLANE txn=%llu bink=0x%08x lv2=0x%08x worker=%u lane=worker%u phase=%s plane=%s ea=0x%08x pitch=0x%x height=0x%x size=0x%x valid=1 zeros=%llu nonzero=%llu hash=%s",
-					static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, worker, worker, phase, s_plane_names[i],
+				ppu_log.notice("BINK_ASYNC_TXN_PLANE run=0x%016llx txn=%llu bink=0x%08x lv2=0x%08x worker=%u lane=worker%u phase=%s plane=%s ea=0x%08x pitch=0x%x height=0x%x size=0x%x valid=1 zeros=%llu nonzero=%llu hash=%s",
+					static_cast<unsigned long long>(s_active.run), static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, worker, worker, phase, s_plane_names[i],
 					current[i].ea, current[i].pitch, current[i].height, current[i].size,
 					static_cast<unsigned long long>(current[i].size - current[i].nonzero), static_cast<unsigned long long>(current[i].nonzero), current[i].sha256);
 			}
@@ -3218,24 +3220,28 @@ namespace postbikini_probe
 
 		if (!s_identity.valid)
 		{
-			s_identity = {true, false, lv2_id, taskset, task, elf_addr, entry};
-			ppu_log.notice("BINK_IDENTITY title=BLUS31156 app=01.06 lv2=0x%08x proof=qa-equivalent identitySource=spu_note name=binkspu_task.elf taskset=0x%llx task=%u elf=0x%08x entry=0x%08x",
-				lv2_id, static_cast<unsigned long long>(taskset), task, elf_addr, entry);
+			s_identity.valid = true;
+			s_identity.run = get_guest_system_time();
+			if (!s_identity.run)
+			{
+				s_identity.run = 1;
+			}
+			s_identity.lv2_id = lv2_id;
+			s_identity.taskset = taskset;
+			s_identity.task = task;
+			s_identity.elf_addr = elf_addr;
+			s_identity.entry = entry;
+			ppu_log.notice("BINK_IDENTITY title=BLUS31156 app=01.06 run=0x%016llx lv2=0x%08x proof=spu-note elfMatch=1 identitySource=elf_note_name name=binkspu_task.elf taskset=0x%llx task=%u elf=0x%08x entry=0x%08x",
+				static_cast<unsigned long long>(s_identity.run), lv2_id, static_cast<unsigned long long>(taskset), task, elf_addr, entry);
 			return;
 		}
 
-		if (s_identity.lv2_id != lv2_id)
-		{
-			s_identity.ambiguous = true;
-			s_completed_valid = false;
-			if (s_active.active && !s_active.invalid)
-			{
-				s_active.invalid = true;
-				ppu_log.error("BINK_ASYNC_TXN_REJECT txn=%llu bink=0x%08x pc=0x00000000 reason=bink_identity_ambiguous",
-					static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2);
-			}
-			ppu_log.error("BINK_IDENTITY_AMBIGUOUS lv2=0x%08x proof=qa-equivalent identitySource=spu_note first=0x%08x second=0x%08x", lv2_id, s_identity.lv2_id, lv2_id);
-		}
+		// Every call reaching this function already proved the loaded ELF carries
+		// the exact binkspu_task.elf note. GTA creates several Bink Tasksets and
+		// SPURS may schedule them on different physical SPUs, so neither taskset
+		// nor lv2_id is a unique Bink identity. Keep the first proven lv2_id only
+		// as the run-local correlation anchor required by the offline classifier.
+		return;
 	}
 
 	bool read_completed(completed_snapshot& out)
@@ -3275,6 +3281,7 @@ namespace postbikini_probe
 			}
 
 			active_state candidate{};
+			candidate.run = s_identity.run;
 			candidate.txn = ++s_next_txn;
 			candidate.bink_lv2 = s_identity.lv2_id;
 			candidate.handle = static_cast<u32>(r3);
@@ -3298,8 +3305,8 @@ namespace postbikini_probe
 			candidate.active = true;
 			s_active = std::move(candidate);
 			s_started_once = true;
-			ppu_log.notice("BINK_ASYNC_TXN_BEGIN txn=%llu bink=0x%08x lv2=0x%08x handle=0x%08x object=0x%08x slot=%u prod1=0x%x cur1=0x%x prod2=0x%x cur2=0x%x Y=0x%08x U=0x%08x V=0x%08x",
-				static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, s_active.handle, s_active.object, s_active.slot,
+			ppu_log.notice("BINK_ASYNC_TXN_BEGIN run=0x%016llx txn=%llu bink=0x%08x lv2=0x%08x handle=0x%08x object=0x%08x slot=%u prod1=0x%x cur1=0x%x prod2=0x%x cur2=0x%x Y=0x%08x U=0x%08x V=0x%08x",
+				static_cast<unsigned long long>(s_active.run), static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, s_active.handle, s_active.object, s_active.slot,
 				s_active.workers[0].producer, s_active.workers[0].cursor, s_active.workers[1].producer, s_active.workers[1].cursor,
 				s_active.planes[0].ea, s_active.planes[1].ea, s_active.planes[2].ea);
 			return;
@@ -3340,8 +3347,8 @@ namespace postbikini_probe
 				const u32 before = state.producer;
 				state.producer = producer;
 				state.published = true;
-				ppu_log.notice("BINK_ASYNC_TXN_RESULT_PUBLISH txn=%llu bink=0x%08x lv2=0x%08x worker=%u workerBase=0x%08x cursorEa=0x%08x producerBefore=0x%x producerAfter=0x%x consumer=0x%x",
-					static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, worker, worker_block(worker), worker_cursor(worker), before, producer, cursor);
+				ppu_log.notice("BINK_ASYNC_TXN_RESULT_PUBLISH run=0x%016llx txn=%llu bink=0x%08x lv2=0x%08x worker=%u workerBase=0x%08x cursorEa=0x%08x producerBefore=0x%x producerAfter=0x%x consumer=0x%x",
+					static_cast<unsigned long long>(s_active.run), static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, worker, worker_block(worker), worker_cursor(worker), before, producer, cursor);
 			}
 			else if (cursor != state.cursor)
 			{
@@ -3399,8 +3406,8 @@ namespace postbikini_probe
 				const u32 before = state->producer;
 				state->producer = producer;
 				state->published = true;
-				ppu_log.notice("BINK_ASYNC_TXN_RESULT_PUBLISH txn=%llu bink=0x%08x lv2=0x%08x worker=%u workerBase=0x%08x cursorEa=0x%08x producerBefore=0x%x producerAfter=0x%x consumer=0x%x observedAt=consumer_return",
-					static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, worker, worker_block(worker), worker_cursor(worker), before, producer, cursor);
+				ppu_log.notice("BINK_ASYNC_TXN_RESULT_PUBLISH run=0x%016llx txn=%llu bink=0x%08x lv2=0x%08x worker=%u workerBase=0x%08x cursorEa=0x%08x producerBefore=0x%x producerAfter=0x%x consumer=0x%x observedAt=consumer_return",
+					static_cast<unsigned long long>(s_active.run), static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, worker, worker_block(worker), worker_cursor(worker), before, producer, cursor);
 			}
 
 			const u32 result = static_cast<u32>(r3);
@@ -3411,8 +3418,8 @@ namespace postbikini_probe
 					reject_locked("consumer_not_single_forward_step", pc);
 					return;
 				}
-				ppu_log.notice("BINK_ASYNC_TXN_RESULT_CONSUMED txn=%llu bink=0x%08x lv2=0x%08x worker=%u workerBase=0x%08x cursorEa=0x%08x cursorBefore=0x%x cursorAfter=0x%x producer=0x%x result=1",
-					static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, worker, worker_block(worker), worker_cursor(worker), state->wait_cursor, cursor, producer);
+				ppu_log.notice("BINK_ASYNC_TXN_RESULT_CONSUMED run=0x%016llx txn=%llu bink=0x%08x lv2=0x%08x worker=%u workerBase=0x%08x cursorEa=0x%08x cursorBefore=0x%x cursorAfter=0x%x producer=0x%x result=1",
+					static_cast<unsigned long long>(s_active.run), static_cast<unsigned long long>(s_active.txn), s_active.bink_lv2, s_active.bink_lv2, worker, worker_block(worker), worker_cursor(worker), state->wait_cursor, cursor, producer);
 				state->cursor = cursor;
 				state->consumed = true;
 			}
@@ -3445,6 +3452,7 @@ namespace postbikini_probe
 				return;
 			}
 
+			s_completed.run = s_active.run;
 			s_completed.txn = s_active.txn;
 			s_completed.bink_lv2 = s_active.bink_lv2;
 			s_completed.handle = s_active.handle;
@@ -3453,8 +3461,8 @@ namespace postbikini_probe
 			s_rsx_seen = {};
 			s_completed_valid = true;
 			s_active.active = false;
-			ppu_log.notice("BINK_ASYNC_TXN_FRAME_COMPLETE txn=%llu bink=0x%08x lv2=0x%08x handle=0x%08x slot=%u",
-				static_cast<unsigned long long>(s_completed.txn), s_completed.bink_lv2, s_completed.bink_lv2, s_completed.handle, s_completed.slot);
+			ppu_log.notice("BINK_ASYNC_TXN_FRAME_COMPLETE run=0x%016llx txn=%llu bink=0x%08x lv2=0x%08x handle=0x%08x slot=%u",
+				static_cast<unsigned long long>(s_completed.run), static_cast<unsigned long long>(s_completed.txn), s_completed.bink_lv2, s_completed.bink_lv2, s_completed.handle, s_completed.slot);
 		}
 	}
 }
