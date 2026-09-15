@@ -10,12 +10,96 @@ typedef int HostCode;
 #else
 #include <iconv.h>
 #include <errno.h>
+#ifdef __ANDROID__
+#include <dlfcn.h>
+#endif
 typedef const char *HostCode;
 #endif
 
 #include "cellL10n.h"
 
 LOG_CHANNEL(cellL10n);
+
+#if defined(__ANDROID__)
+namespace
+{
+	using host_iconv_open_t = iconv_t (*)(const char*, const char*);
+	using host_iconv_t = size_t (*)(iconv_t, char**, size_t*, char**, size_t*);
+	using host_iconv_close_t = int (*)(iconv_t);
+
+	struct android_iconv_api
+	{
+		host_iconv_open_t open = nullptr;
+		host_iconv_t convert = nullptr;
+		host_iconv_close_t close = nullptr;
+
+		android_iconv_api()
+		{
+			// Bionic exposes iconv starting with Android 9 (API 28), which is also
+			// GameDeck's minimum supported Android version for the embedded PS3 path.
+			// The native core is compiled against API 24, where iconv.h intentionally
+			// hides the declarations, so resolve the device libc entry points lazily.
+			void* libc = dlopen("libc.so", RTLD_NOW | RTLD_LOCAL);
+			if (!libc)
+			{
+				return;
+			}
+
+			open = reinterpret_cast<host_iconv_open_t>(dlsym(libc, "iconv_open"));
+			convert = reinterpret_cast<host_iconv_t>(dlsym(libc, "iconv"));
+			close = reinterpret_cast<host_iconv_close_t>(dlsym(libc, "iconv_close"));
+		}
+
+		bool available() const
+		{
+			return open && convert && close;
+		}
+	};
+
+	const android_iconv_api& get_android_iconv_api()
+	{
+		static const android_iconv_api api;
+		return api;
+	}
+
+	iconv_t host_iconv_open(const char* dst, const char* src)
+	{
+		const auto& api = get_android_iconv_api();
+		if (!api.available())
+		{
+			errno = ENOSYS;
+			return reinterpret_cast<iconv_t>(-1);
+		}
+		return api.open(dst, src);
+	}
+
+	size_t host_iconv(iconv_t converter, char** src, size_t* src_left, char** dst, size_t* dst_left)
+	{
+		const auto& api = get_android_iconv_api();
+		if (!api.available())
+		{
+			errno = ENOSYS;
+			return static_cast<size_t>(-1);
+		}
+		return api.convert(converter, src, src_left, dst, dst_left);
+	}
+
+	int host_iconv_close(iconv_t converter)
+	{
+		const auto& api = get_android_iconv_api();
+		if (!api.available())
+		{
+			errno = ENOSYS;
+			return -1;
+		}
+		return api.close(converter);
+	}
+}
+#else
+#define host_iconv_open iconv_open
+#define host_iconv iconv
+#define host_iconv_close iconv_close
+#endif
 
 // Translate code id to code name. some codepage may has another name.
 // If this makes your compilation fail, try replace the string code with one in "iconv -l"
@@ -212,12 +296,17 @@ s32 _ConvertStr(s32 src_code, const void *src, s32 src_len, s32 dst_code, void *
 	return ConversionOK;
 #else
 	s32 retValue = ConversionOK;
-	iconv_t ict = iconv_open(dstCode, srcCode);
+	iconv_t ict = host_iconv_open(dstCode, srcCode);
+	if (ict == reinterpret_cast<iconv_t>(-1))
+	{
+		return ConverterUnknown;
+	}
+
 	usz srcLen = src_len;
 	if (dst)
 	{
 		usz dstLen = *dst_len;
-		usz ictd = iconv(ict, utils::bless<char*>(&src), &srcLen, utils::bless<char*>(&dst), &dstLen);
+		usz ictd = host_iconv(ict, utils::bless<char*>(&src), &srcLen, utils::bless<char*>(&dst), &dstLen);
 		*dst_len -= dstLen;
 		if (ictd == umax)
 		{
@@ -240,9 +329,9 @@ s32 _ConvertStr(s32 src_code, const void *src, s32 src_len, s32 dst_code, void *
 		char buf[16];
 		while (srcLen > 0)
 		{
-			//char *bufPtr = buf;
+			char* bufPtr = buf;
 			usz bufLeft = sizeof(buf);
-			usz ictd = iconv(ict, utils::bless<char*>(&src), &srcLen, utils::bless<char*>(&dst), &bufLeft);
+			usz ictd = host_iconv(ict, utils::bless<char*>(&src), &srcLen, &bufPtr, &bufLeft);
 			*dst_len += sizeof(buf) - bufLeft;
 			if (ictd == umax && errno != E2BIG)
 			{
@@ -259,7 +348,7 @@ s32 _ConvertStr(s32 src_code, const void *src, s32 src_len, s32 dst_code, void *
 			}
 		}
 	}
-	iconv_close(ict);
+	host_iconv_close(ict);
 	return retValue;
 #endif
 }
