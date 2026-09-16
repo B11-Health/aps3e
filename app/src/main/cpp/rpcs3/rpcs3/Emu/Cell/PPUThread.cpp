@@ -5286,7 +5286,18 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 
 		*progress_dialog = get_localized_string(localized_string_id::PROGRESS_DIALOG_COMPILING_PPU_MODULES);
 
-		const u32 thread_count = std::max<u32>(std::min<u32>(::size32(workload), rpcs3::utils::get_max_threads()), 1) - 1;
+		u32 thread_count = std::max<u32>(std::min<u32>(::size32(workload), rpcs3::utils::get_max_threads()), 1) - 1;
+
+#if defined(ANDROID) || defined(__ANDROID__)
+		if (Emu.GetTitleID() == "BLUS31156")
+		{
+			// Android can run out of Scudo/virtual-memory map space when two MCJIT
+			// instances compile GTA V PPU modules concurrently. Keep gameplay PPU
+			// threading unchanged; only serialize cache construction for this title.
+			thread_count = 0;
+			ppu_log.notice("GTA_PPU_COMPILE_SERIAL fresh1 workload=%u", ::size32(workload));
+		}
+#endif
 
 		struct thread_index_allocator
 		{
