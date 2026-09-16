@@ -74,7 +74,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /home/runner/.cache/ccache
-          key: aps3e-sep4-005b-r29-${{ runner.os }}
+          key: aps3e-sep4-005b-r29-${{ runner.os }}-${{ hashFiles('.github/workflows/sep4-repro.yml') }}
+          restore-keys: |
+            aps3e-sep4-005b-r29-${{ runner.os }}
 
       - name: Build exact Sep4 core
         shell: bash
@@ -131,7 +133,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_NDK="$NDK" -DCMAKE_SYSROOT="$SYSROOT" \
             -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 -DANDROID_PLATFORM_LEVEL=24 -DANDROID_STL=c++_shared \
             -DANDROID_USE_LEGACY_TOOLCHAIN_FILE=OFF -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_FLAGS="-I$ICONV_PREFIX/include" -DCMAKE_CXX_FLAGS="-I$ICONV_PREFIX/include" \
+            -DCMAKE_C_FLAGS="-I$ICONV_PREFIX/include -DVK_USE_PLATFORM_ANDROID_KHR" -DCMAKE_CXX_FLAGS="-I$ICONV_PREFIX/include -DVK_USE_PLATFORM_ANDROID_KHR" \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS="$CLANG_SCAN_DEPS" -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
             -DCMAKE_SKIP_RPATH=ON -DUSE_NATIVE_INSTRUCTIONS=OFF -DWITH_LLVM=ON -DBUILD_LLVM=ON -DSTATIC_LINK_LLVM=ON \
             -DLLVM_TARGETS_TO_BUILD=AArch64 -DUSE_PRECOMPILED_HEADERS=OFF -DUSE_FAUDIO=OFF -DUSE_SYSTEM_CURL=OFF \
@@ -166,7 +168,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /home/runner/.cache/ccache
-          key: aps3e-sep4-005b-r29-${{ runner.os }}
+          key: aps3e-sep4-005b-r29-${{ runner.os }}-${{ hashFiles('.github/workflows/sep4-repro.yml') }}
 
       - name: Upload Sep4 core
         if: success()
