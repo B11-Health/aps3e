@@ -3048,7 +3048,10 @@ void PPUTranslator::LDARX(ppu_opcode_t op)
 		gamedeck_trace::emit("waveplayer_ldarx_compile", "addr=0x%08llx\tglobal_reservation_mode=%d", static_cast<unsigned long long>(m_addr), static_cast<int>(g_cfg.core.ppu_128_reservations_loop_max_length.get()));
 	}
 #endif
-	if (g_cfg.core.ppu_128_reservations_loop_max_length)
+	// Route only the proven GTA V WavePlayerJob completion LDARX through the
+	// accurate reservation interpreter; global reservation behavior is unchanged.
+	const bool gta_waveplayer_slot22_full = !m_reloc && m_addr == 0x023d1744u;
+	if (g_cfg.core.ppu_128_reservations_loop_max_length || gta_waveplayer_slot22_full)
 	{
 		RegStore(Trunc(GetAddr()), m_cia);
 		FlushRegisters();

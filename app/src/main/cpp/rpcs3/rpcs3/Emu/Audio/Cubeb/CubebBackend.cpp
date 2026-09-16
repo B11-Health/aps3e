@@ -205,6 +205,13 @@ bool CubebBackend::Open(std::string_view dev_id, AudioFreq freq, AudioSampleSize
 		return false;
 	}
 
+#ifdef __ANDROID__
+	// AAudio begins issuing callbacks as soon as cubeb_stream_start() succeeds.
+	// Keep the software playback gate in sync with the already-started native stream;
+	// Pause() still clears m_playing and Play() remains idempotent.
+	m_playing = true;
+#endif
+
 	if (int err = cubeb_stream_set_volume(m_stream, 1.0))
 	{
 		Cubeb.error("cubeb_stream_set_volume() failed: %i", err);

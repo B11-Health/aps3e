@@ -705,7 +705,14 @@ void cell_audio_thread::operator()()
 
 	thread_ctrl::scoped_priority high_prio(+1);
 
+#ifdef __ANDROID__
+	// Android starts the native Cubeb/AAudio stream during backend Open(). Do not
+	// keep CellAudio behind the broader IsPausedOrReady() gate merely because the
+	// emulator is still in system_state::starting; wait only for real pause/ready.
+	while (Emu.IsPaused() || Emu.IsReady())
+#else
 	while (Emu.IsPausedOrReady())
+#endif
 	{
 		thread_ctrl::wait_for(5000);
 	}

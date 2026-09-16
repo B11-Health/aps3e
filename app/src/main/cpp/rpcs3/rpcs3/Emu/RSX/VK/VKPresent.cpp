@@ -600,7 +600,11 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 	ensure(m_current_frame->present_image == umax);
 	ensure(m_current_frame->swap_command_buffer == nullptr);
 
+#ifdef ANDROID
+	u64 timeout = UINT64_MAX;
+#else
 	u64 timeout = m_swapchain->get_swap_image_count() <= 2? 0ull: 100000000ull;
+#endif
 	while (VkResult status = m_swapchain->acquire_next_swapchain_image(m_current_frame->acquire_signal_semaphore, timeout, &m_current_frame->present_image))
 	{
 		switch (status)

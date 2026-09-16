@@ -78,6 +78,28 @@ namespace gamedeck_trace
 				qa_dir = "/sdcard/Android/media/io.gamedeck.mobile.desktoppreview.qa/GameDeck-Console/qa";
 			}
 
+			// Runtime builds stay lean by default. Enable the file-backed QA trace only when
+			// explicitly requested before process start via env or the QA sentinel file.
+			bool trace_requested = false;
+			if (const char* env = std::getenv("GAMEDECK_PS3_TRACE"); env && *env && std::strcmp(env, "0") != 0)
+			{
+				trace_requested = true;
+			}
+			else
+			{
+				char enable_path[1024]{};
+				const int enable_len = std::snprintf(enable_path, sizeof(enable_path), "%s/trace-enabled", qa_dir);
+				if (enable_len > 0 && static_cast<std::size_t>(enable_len) < sizeof(enable_path) && ::access(enable_path, F_OK) == 0)
+				{
+					trace_requested = true;
+				}
+			}
+
+			if (!trace_requested)
+			{
+				return;
+			}
+
 			const std::uint64_t start = monotonic_ns();
 			const int pid = static_cast<int>(::getpid());
 			const int len = std::snprintf(g_path, sizeof(g_path), "%s/clean-engine-trace-%d-%llu.tsv", qa_dir, pid,

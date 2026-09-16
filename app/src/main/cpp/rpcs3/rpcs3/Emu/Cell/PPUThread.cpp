@@ -3058,13 +3058,16 @@ static T ppu_load_acquire_reservation(ppu_thread& ppu, u32 addr)
 	ppu.raddr = addr;
 
 	u32 addr_mask = -1;
+	const u32 cia = ppu.cia;
+	const bool gta_waveplayer_slot22_full = sizeof(T) == sizeof(u64) && cia == 0x023d1744u;
+	const s32 max = g_cfg.core.ppu_128_reservations_loop_max_length;
 
-	if (const s32 max = g_cfg.core.ppu_128_reservations_loop_max_length)
+	if (max || gta_waveplayer_slot22_full)
 	{
-		// If we use it in HLE it means we want the accurate version
-		ppu.use_full_rdata = max < 0 || ppu.current_function || [&]()
+		// GTA V BLUS31156 WavePlayerJob completion needs a real 128-byte PPU reservation
+		// for this one proven LDARX/STDCX publication loop. All other sites preserve config behavior.
+		ppu.use_full_rdata = gta_waveplayer_slot22_full || max < 0 || ppu.current_function || [&]()
 		{
-			const u32 cia = ppu.cia;
 
 			if ((cia & 0xffff) >= 0x10000u - max * 4)
 			{
@@ -5144,9 +5147,12 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 				local_jit_bounds = std::make_shared<std::pair<u32, u32>>(u32{umax}, 0);
 			}
 
-			if (false)
+			// Emulator-source changes are not normally part of the PPU object key. Salt only
+			// the JIT module that contains the GTA WavePlayer reservation site so the old
+			// cache remains intact and only this module is rebuilt side-by-side.
+			if (part.local_bounds.first <= 0x023d1744u && 0x023d1744u < part.local_bounds.second)
 			{
-				const be_t<u64> forced_upd = 3;
+				const be_t<u64> forced_upd = 0x4744574156453135ull; // "GDWAVE15"
 				sha1_update(&ctx, reinterpret_cast<const u8*>(&forced_upd), sizeof(forced_upd));
 			}
 
