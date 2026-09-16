@@ -494,7 +494,12 @@ public:
 
 		// Restore space that was overestimated
 		ensure(m_compiler->add_sub_disk_space(max_size - module_file.file.size()));
-		module_file.commit();
+
+		if (!module_file.commit())
+		{
+			jit_log.error("LLVM: Failed to commit module file: %s (%s)", name, fs::g_tls_error);
+			return;
+		}
 	}
 
 	static std::unique_ptr<llvm::MemoryBuffer> load(const std::string& path)

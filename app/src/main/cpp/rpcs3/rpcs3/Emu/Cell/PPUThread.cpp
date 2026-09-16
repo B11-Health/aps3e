@@ -5280,6 +5280,7 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 		// Sync variable to acquire workloads
 		atomic_t<u64> work_cv = 0;
 		atomic_t<u64> work_done = 0;
+		atomic_t<u32> cache_publish_failed = 0;
 
 		// Update progress dialog
 		g_progr_ptotal += ::size32(workload);
@@ -5308,6 +5309,7 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 		{
 			const std::add_pointer_t<atomic_t<u64>> work_cv;
 			const std::add_pointer_t<atomic_t<u64>> work_done;
+			const std::add_pointer_t<atomic_t<u32>> cache_publish_failed;
 			std::vector<std::pair<std::string, ppu_module<lv2_obj>>>& workload;
 			const ppu_module<lv2_obj>& main_module;
 			const std::string& cache_path;
@@ -5315,11 +5317,13 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 
 			std::unique_lock<decltype(jit_core_allocator::sem)> core_lock;
 
-			thread_op(atomic_t<u64>* _work_cv, atomic_t<u64>* _work_done, std::vector<std::pair<std::string, ppu_module<lv2_obj>>>& workload
-				, const cpu_thread* cpu, const ppu_module<lv2_obj>& main_module, const std::string& cache_path, decltype(jit_core_allocator::sem)& sem) noexcept
+			thread_op(atomic_t<u64>* _work_cv, atomic_t<u64>* _work_done, atomic_t<u32>* _cache_publish_failed
+				, std::vector<std::pair<std::string, ppu_module<lv2_obj>>>& workload, const cpu_thread* cpu
+				, const ppu_module<lv2_obj>& main_module, const std::string& cache_path, decltype(jit_core_allocator::sem)& sem) noexcept
 
 				: work_cv(_work_cv)
 				, work_done(_work_done)
+				, cache_publish_failed(_cache_publish_failed)
 				, workload(workload)
 				, main_module(main_module)
 				, cache_path(cache_path)
@@ -5332,6 +5336,7 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 			thread_op(const thread_op& other) noexcept
 				: work_cv(other.work_cv)
 				, work_done(other.work_done)
+				, cache_publish_failed(other.cache_publish_failed)
 				, workload(other.workload)
 				, main_module(other.main_module)
 				, cache_path(other.cache_path)
@@ -5360,15 +5365,49 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 						continue;
 					}
 
+					if (*cache_publish_failed)
+					{
+						continue;
+					}
+
 					// Keep allocating workload
 					const auto& [obj_name, part] = std::as_const(workload)[i];
 
 					ppu_log.warning("LLVM: Compiling module %s%s", cache_path, obj_name);
 
+					bool cache_published = true;
+					u32 compile_attempt = 0;
+
+#if defined(ANDROID) || defined(__ANDROID__)
+					const bool verify_gta_cache = Emu.GetTitleID() == "BLUS31156";
+#else
+					const bool verify_gta_cache = false;
+#endif
+
+					do
 					{
-						// Use another JIT instance
-						jit_compiler jit2({}, g_cfg.core.llvm_cpu.to_string(), 0x1);
-						ppu_initialize2(jit2, part, cache_path, obj_name);
+						compile_attempt++;
+
+						{
+							// Use another JIT instance
+							jit_compiler jit2({}, g_cfg.core.llvm_cpu.to_string(), 0x1);
+							ppu_initialize2(jit2, part, cache_path, obj_name);
+						}
+
+						cache_published = !verify_gta_cache || jit_compiler::check(cache_path + obj_name);
+
+						if (!cache_published)
+						{
+							ppu_log.error("GTA_PPU_CACHE_PUBLISH_RETRY object=%s attempt=%u", obj_name, compile_attempt);
+						}
+					}
+					while (!cache_published && compile_attempt < 3 && !(cpu ? cpu->state.all_of(cpu_flag::exit) : Emu.IsStopped()));
+
+					if (!cache_published)
+					{
+						*cache_publish_failed = 1;
+						ppu_log.error("GTA_PPU_CACHE_PUBLISH_FAIL object=%s attempts=%u", obj_name, compile_attempt);
+						continue;
 					}
 
 					ppu_log.success("LLVM: Compiled module %s", obj_name);
@@ -5407,13 +5446,13 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 		};
 
 		named_thread_group threads(worker_group_name, thread_count
-			, thread_op(&work_cv, &work_done, workload, cpu, info, cache_path, g_fxo->get<jit_core_allocator>().sem)
+			, thread_op(&work_cv, &work_done, &cache_publish_failed, workload, cpu, info, cache_path, g_fxo->get<jit_core_allocator>().sem)
 			, try_lock_thread);
 
 		const auto old_name = thread_ctrl::get_name();
 		thread_ctrl::set_name(worker_group_name + std::to_string(thread_count + 1));
 
-		thread_op cur_op(&work_cv, &work_done, workload, cpu, info, cache_path, g_fxo->get<jit_core_allocator>().sem);
+		thread_op cur_op(&work_cv, &work_done, &cache_publish_failed, workload, cpu, info, cache_path, g_fxo->get<jit_core_allocator>().sem);
 
 		if (try_lock_thread(thread_count, cur_op))
 		{
@@ -5425,6 +5464,13 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 
 		thread_ctrl::set_name(old_name);
 		g_watchdog_hold_ctr--;
+
+		if (cache_publish_failed)
+		{
+			ppu_log.error("GTA_PPU_CACHE_PUBLISH_ABORT failed to publish one or more PPU objects");
+			Emu.Pause();
+			return compiled_new;
+		}
 	}
 
 	// Initialize compiler instance

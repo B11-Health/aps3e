@@ -37,16 +37,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify Sep4 base plus fresh-cache namespace only
+      - name: Verify Sep4 base plus scoped GTA cache fixes
         shell: bash
         run: |
           set -euo pipefail
           mapfile -t changed < <(git diff --name-only "$SOURCE_BASE" HEAD -- app/src/main/cpp)
           printf 'source_delta=%s\n' "${changed[*]}"
-          test "${#changed[@]}" -eq 2
+          test "${#changed[@]}" -eq 3
           for path in "${changed[@]}"; do
             case "$path" in
-              app/src/main/cpp/rpcs3/rpcs3/Emu/System.cpp|app/src/main/cpp/rpcs3/rpcs3/Emu/Cell/PPUThread.cpp) ;;
+              app/src/main/cpp/rpcs3/rpcs3/Emu/System.cpp|app/src/main/cpp/rpcs3/rpcs3/Emu/Cell/PPUThread.cpp|app/src/main/cpp/rpcs3/Utilities/JITLLVM.cpp) ;;
               *) echo "unexpected source delta: $path" >&2; exit 31 ;;
             esac
           done
@@ -54,6 +54,10 @@ jobs:
           grep -Fq 'gd-sep4-fresh1/' app/src/main/cpp/rpcs3/rpcs3/Emu/System.cpp
           grep -Fq 'GTA_CACHE_NAMESPACE fresh1' app/src/main/cpp/rpcs3/rpcs3/Emu/System.cpp
           test "$(grep -F -c 'gd-sep4-fresh1/' app/src/main/cpp/rpcs3/rpcs3/Emu/Cell/PPUThread.cpp)" -eq 2
+          grep -Fq 'GTA_PPU_COMPILE_SERIAL fresh1' app/src/main/cpp/rpcs3/rpcs3/Emu/Cell/PPUThread.cpp
+          grep -Fq 'GTA_PPU_CACHE_PUBLISH_RETRY' app/src/main/cpp/rpcs3/rpcs3/Emu/Cell/PPUThread.cpp
+          grep -Fq 'GTA_PPU_CACHE_PUBLISH_ABORT' app/src/main/cpp/rpcs3/rpcs3/Emu/Cell/PPUThread.cpp
+          grep -Fq 'Failed to commit module file' app/src/main/cpp/rpcs3/Utilities/JITLLVM.cpp
           git status --short
 
       - name: Reclaim runner disk
