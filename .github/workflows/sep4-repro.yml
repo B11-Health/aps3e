@@ -1,0 +1,169 @@
+name: Sep4 GTA repro core
+
+on:
+  push:
+    branches:
+      - solo/sep4-cloud-public-20260916
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: Parallel compile jobs
+        required: false
+        default: '4'
+
+permissions:
+  contents: read
+
+env:
+  ANDROID_NDK_VERSION: 29.0.14206865
+  ANDROID_API: '24'
+  LIBICONV_VERSION: '1.19'
+  LIBICONV_SHA256: 88dd96a8c0464eca144fc791ae60cd31cd8ee78321e67397e25fc095c4a19aa6
+  LIBICONV_URL: https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.19.tar.gz
+  SOURCE_BASE: 005b801a2c38ae100d3bba1bcbf06a2e8462ac20
+  CCACHE_DIR: /home/runner/.cache/ccache
+
+jobs:
+  core:
+    name: Build Sep4 ARM64 libe.so · NDK r29
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout exact branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Verify source subtree is exact Sep4 base
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code "$SOURCE_BASE" HEAD -- app/src/main/cpp
+          git status --short
+
+      - name: Reclaim runner disk
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
+          df -h /
+
+      - name: Install host build tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build ccache cmake python3 pkg-config curl
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install exact NDK r29
+        shell: bash
+        run: |
+          sdkmanager --install "ndk;$ANDROID_NDK_VERSION"
+          cat "$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION/source.properties"
+
+      - name: Restore compiler cache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.cache/ccache
+          key: aps3e-sep4-005b-r29-${{ runner.os }}
+
+      - name: Build exact Sep4 core
+        shell: bash
+        env:
+          JOBS: ${{ inputs.jobs || '4' }}
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/sep4-repro"
+          OUT="$GITHUB_WORKSPACE/out/sep4-core"
+          mkdir -p "$WORK" "$OUT"
+          NDK="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          SYSROOT="$TOOLCHAIN/sysroot"
+          TARGET=aarch64-linux-android
+          CC_TARGET="$TOOLCHAIN/bin/${TARGET}${ANDROID_API}-clang"
+          CXX_TARGET="$TOOLCHAIN/bin/${TARGET}${ANDROID_API}-clang++"
+
+          echo '== GNU libiconv header/static archive =='
+          curl -fL --retry 3 --retry-delay 2 "$LIBICONV_URL" -o "$WORK/libiconv.tar.gz"
+          printf '%s  %s\n' "$LIBICONV_SHA256" "$WORK/libiconv.tar.gz" | sha256sum -c -
+          tar -xzf "$WORK/libiconv.tar.gz" -C "$WORK"
+          ICONV_SRC="$WORK/libiconv-$LIBICONV_VERSION"
+          ICONV_PREFIX="$WORK/libiconv-prefix"
+          (
+            cd "$ICONV_SRC"
+            CC="$CC_TARGET" CXX="$CXX_TARGET" AR="$TOOLCHAIN/bin/llvm-ar" RANLIB="$TOOLCHAIN/bin/llvm-ranlib" STRIP="$TOOLCHAIN/bin/llvm-strip" \
+            CFLAGS='-O2 -fPIC' CXXFLAGS='-O2 -fPIC' \
+            ./configure --host="$TARGET" --prefix="$ICONV_PREFIX" --enable-static --disable-shared --disable-nls
+            make --jobs "$JOBS"
+            make install
+          )
+          test -s "$ICONV_PREFIX/include/iconv.h"
+
+          export CCACHE_DIR=/home/runner/.cache/ccache
+          export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+          export CCACHE_NOHASHDIR=true
+          ccache -M 2G >/dev/null
+
+          echo '== Host llvm-tblgen =='
+          HOST_LLVM="$WORK/llvm-host"
+          cmake -S "$GITHUB_WORKSPACE/app/src/main/cpp/rpcs3/3rdparty/llvm/llvm-19.1.7/llvm" -B "$HOST_LLVM" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DLLVM_TARGETS_TO_BUILD=AArch64 -DLLVM_ENABLE_PROJECTS= -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_BACKTRACES=OFF
+          cmake --build "$HOST_LLVM" --target llvm-tblgen --parallel "$JOBS"
+          LLVM_TABLEGEN="$HOST_LLVM/bin/llvm-tblgen"
+
+          echo '== Android ARM64 libe.so =='
+          B="$WORK/android"
+          cmake -S "$GITHUB_WORKSPACE/app/src/main/cpp" -B "$B" -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_NDK="$NDK" -DCMAKE_SYSROOT="$SYSROOT" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 -DANDROID_PLATFORM_LEVEL=24 -DANDROID_STL=c++_shared \
+            -DANDROID_USE_LEGACY_TOOLCHAIN_FILE=OFF -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-I$ICONV_PREFIX/include" -DCMAKE_CXX_FLAGS="-I$ICONV_PREFIX/include" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+            -DCMAKE_SKIP_RPATH=ON -DUSE_NATIVE_INSTRUCTIONS=OFF -DWITH_LLVM=ON -DBUILD_LLVM=ON -DSTATIC_LINK_LLVM=ON \
+            -DLLVM_TARGETS_TO_BUILD=AArch64 -DUSE_PRECOMPILED_HEADERS=OFF -DUSE_FAUDIO=OFF -DUSE_SYSTEM_CURL=OFF \
+            -DUSE_SYSTEM_FFMPEG=OFF -DUSE_SYSTEM_LIBPNG=OFF -DUSE_SYSTEM_ZLIB=ON -DUSE_SYSTEM_ZSTD=OFF \
+            -DLLVM_TABLEGEN="$LLVM_TABLEGEN" -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_BACKTRACES=OFF -DLLVM_ENABLE_LIBEDIT=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF -DCURL_BROTLI=OFF -DUSE_NGHTTP2=OFF -DCURL_ZSTD=OFF -DCMAKE_HAVE_LIBC_PTHREAD=1 \
+            -DHAVE_LIBPTHREAD=0 -DPTHREAD_IN_LIBC=1 -DHAVE_PTHREAD_RWLOCK_INIT=1 -DHAVE_PTHREAD_MUTEX_LOCK=1 -DHAVE_LIBRT=0 \
+            -DZLIB_INCLUDE_DIR="$SYSROOT/usr/include" -DZLIB_LIBRARY="$SYSROOT/usr/lib/aarch64-linux-android/24/libz.so" \
+            -DVulkan_INCLUDE_DIR="$SYSROOT/usr/include" -DVulkan_LIBRARY="$SYSROOT/usr/lib/aarch64-linux-android/24/libvulkan.so"
+          cmake --build "$B" --target libe.so --parallel "$JOBS" | tee "$OUT/build.log"
+          CORE="$B/libe.so"
+          test -s "$CORE"
+          cp "$CORE" "$OUT/libe.so"
+          file "$CORE" | tee "$OUT/file.txt"
+          readelf -h "$CORE" > "$OUT/elf-header.txt"
+          readelf -d "$CORE" > "$OUT/elf-dynamic.txt"
+          grep -Fq 'Machine:                           AArch64' "$OUT/elf-header.txt"
+          grep -Eq 'Type:.*DYN' "$OUT/elf-header.txt"
+          ! grep -Eq '\(RPATH\)|\(RUNPATH\)' "$OUT/elf-dynamic.txt"
+          UNDEF_A64=$(readelf -Ws "$CORE" | grep ' UND ' | grep -c 'aarch64::' || true)
+          UNDEF_PNG=$(readelf -Ws "$CORE" | grep ' UND ' | grep -Ec 'png_(riffle_palette_neon|init_filter_functions_neon|read_filter_row_up_neon|read_filter_row_sub3_neon|read_filter_row_sub4_neon)' || true)
+          test "$UNDEF_A64" -eq 0
+          test "$UNDEF_PNG" -eq 0
+          SHA=$(sha256sum "$CORE" | awk '{print $1}')
+          BYTES=$(stat -c %s "$CORE")
+          printf 'SOURCE_BASE=%s\nSOURCE_HEAD=%s\nCORE_SHA256=%s\nCORE_BYTES=%s\n' "$SOURCE_BASE" "$(git rev-parse HEAD)" "$SHA" "$BYTES" | tee "$OUT/PROVENANCE.txt"
+          ccache -s | tee "$OUT/ccache-stats.txt"
+          echo "SEP4_PUBLIC_CLOUD_PASS sha256=$SHA bytes=$BYTES"
+
+      - name: Save compiler cache
+        if: always() && steps.ccache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.cache/ccache
+          key: aps3e-sep4-005b-r29-${{ runner.os }}
+
+      - name: Upload Sep4 core
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sep4-gta-repro-core
+          path: out/sep4-core
+          if-no-files-found: error
+          retention-days: 7
