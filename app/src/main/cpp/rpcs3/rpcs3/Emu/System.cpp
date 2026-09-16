@@ -4339,6 +4339,14 @@ void Emulator::ConfigurePPUCache() const
 
 	_main.cache = rpcs3::utils::get_cache_dir(_main.path);
 
+#if defined(ANDROID) || defined(__ANDROID__)
+	if (GetTitleID() == "BLUS31156")
+	{
+		_main.cache += "gd-sep4-fresh1/";
+		sys_log.notice("GTA_CACHE_NAMESPACE fresh1 root=%s", _main.cache);
+	}
+#endif
+
 	fmt::append(_main.cache, "ppu-%s-%s/", fmt::base57(_main.sha1), _main.path.substr(_main.path.find_last_of('/') + 1));
 
 	if (!fs::create_path(_main.cache))

@@ -3725,6 +3725,13 @@ extern void ppu_finalize(const ppu_module<lv2_obj>& info, bool force_mem_release
 	// Get cache path for this executable
 	std::string cache_path = rpcs3::utils::get_cache_dir(info.path);
 
+#if defined(ANDROID) || defined(__ANDROID__)
+	if (Emu.GetTitleID() == "BLUS31156")
+	{
+		cache_path += "gd-sep4-fresh1/";
+	}
+#endif
+
 	// Add PPU hash and filename
 	fmt::append(cache_path, "ppu-%s-%s/", fmt::base57(info.sha1), info.path.substr(info.path.find_last_of('/') + 1));
 
@@ -4608,6 +4615,13 @@ bool ppu_initialize(const ppu_module<lv2_obj>& info, bool check_only, u64 file_s
 	{
 		// New PPU cache location
 		cache_path = rpcs3::utils::get_cache_dir(info.path);
+
+#if defined(ANDROID) || defined(__ANDROID__)
+		if (Emu.GetTitleID() == "BLUS31156")
+		{
+			cache_path += "gd-sep4-fresh1/";
+		}
+#endif
 
 		// Add PPU hash and filename
 		fmt::append(cache_path, "ppu-%s-%s/", fmt::base57(info.sha1), info.path.substr(info.path.find_last_of('/') + 1));
