@@ -15,6 +15,8 @@ permissions:
   contents: read
 
 env:
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
   ANDROID_NDK_VERSION: 29.0.14206865
   ANDROID_API: '24'
   LIBICONV_VERSION: '1.19'
@@ -53,14 +55,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ninja-build ccache cmake python3 pkg-config curl
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install exact NDK r29
         shell: bash
         run: |
-          sdkmanager --install "ndk;$ANDROID_NDK_VERSION"
+          set -euo pipefail
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -path '*/bin/sdkmanager' -print | sort -V | tail -1)
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install "ndk;$ANDROID_NDK_VERSION"
           cat "$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION/source.properties"
+
+      - name: Prepare compiler cache
+        shell: bash
+        run: mkdir -p "$CCACHE_DIR"
 
       - name: Restore compiler cache
         id: ccache-restore
