@@ -67,14 +67,7 @@ jobs:
 
           AFTER="$(stat -c %s "$OUT/libe.so")"
           printf 'after_bytes=%s\n' "$AFTER" | tee -a "$OUT/size.txt"
-          python3 - "$BEFORE" "$AFTER" <<'PY'
-import sys
-before, after = map(int, sys.argv[1:])
-if not after < before:
-    raise SystemExit("strip did not reduce size")
-print(f"reduction_bytes={before-after}")
-print(f"reduction_percent={(before-after)*100.0/before:.2f}")
-PY
+          python3 -c 'import sys; b,a=map(int,sys.argv[1:]); assert a < b, "strip did not reduce size"; print(f"reduction_bytes={b-a}"); print(f"reduction_percent={(b-a)*100.0/b:.2f}")' "$BEFORE" "$AFTER" | tee -a "$OUT/size.txt"
 
           file "$OUT/libe.so" | tee "$OUT/file-after.txt"
           ! grep -Fq 'with debug_info' "$OUT/file-after.txt"
