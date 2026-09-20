@@ -1,0 +1,59 @@
+name: GTA SPU ownership provenance core
+
+on:
+  push:
+    branches:
+      - 'ci/gta-spu-ownership-20260920T015358Z'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gta-spu-ownership-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout synthetic source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          submodules: recursive
+
+      - name: Reclaim runner disk
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
+          df -h
+
+      - name: Install host build tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential ninja-build cmake python3 pkg-config curl file binutils
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install exact NDK r29
+        shell: bash
+        run: |
+          sdkmanager --install 'ndk;29.0.14206865'
+          cat "$ANDROID_HOME/ndk/29.0.14206865/source.properties"
+
+      - name: Build and provenance-gate core
+        id: build
+        shell: bash
+        run: bash ci/gta-spu-ownership/build-core.sh
+
+      - name: Upload build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gta-spu-ownership-core-${{ github.run_id }}
+          path: out/gta-spu-core/
+          if-no-files-found: error
+          retention-days: 7

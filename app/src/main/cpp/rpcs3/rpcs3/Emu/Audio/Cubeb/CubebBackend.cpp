@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <cstdarg>
+#include <cmath>
 #include "util/logs.hpp"
 #include "Emu/Audio/audio_device_enumerator.h"
+#include "Emu/GameDeckTrace.h"
+#include <atomic>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -204,6 +207,13 @@ bool CubebBackend::Open(std::string_view dev_id, AudioFreq freq, AudioSampleSize
 		Close();
 		return false;
 	}
+
+#ifdef __ANDROID__
+	// AAudio begins issuing callbacks as soon as cubeb_stream_start() succeeds.
+	// Keep the software playback gate in sync with the already-started native stream;
+	// Pause() still clears m_playing and Play() remains idempotent.
+	m_playing = true;
+#endif
 
 	if (int err = cubeb_stream_set_volume(m_stream, 1.0))
 	{
@@ -446,6 +456,17 @@ long CubebBackend::data_cb(cubeb_stream* stream, void* user_ptr, void const* /* 
 
 	CubebBackend* const cubeb = static_cast<CubebBackend*>(user_ptr);
 	ensure(cubeb);
+#if defined(__ANDROID__)
+	static std::atomic<std::uint64_t> gd_cb_count{0};
+	static std::atomic<std::uint64_t> gd_last_cb_ns{0};
+	const bool gd_trace_cb = gamedeck_trace::enabled();
+	const std::uint64_t gd_cb_n = gd_cb_count.fetch_add(1, std::memory_order_relaxed) + 1;
+	const std::uint64_t gd_cb_now_ns = gd_trace_cb ? gamedeck_trace::now_ns() : 0;
+	const std::uint64_t gd_cb_prev_ns = gd_trace_cb ? gd_last_cb_ns.exchange(gd_cb_now_ns, std::memory_order_relaxed) : 0;
+	const std::uint64_t gd_cb_gap_us = gd_cb_prev_ns ? (gd_cb_now_ns - gd_cb_prev_ns) / 1000 : 0;
+	u32 gd_written_bytes = 0;
+	const u32 gd_bytes_req = static_cast<u32>(nframes) * cubeb->full_sample_size.observe();
+#endif
 
 	std::unique_lock lock(cubeb->m_cb_mutex, std::defer_lock);
 
@@ -461,6 +482,9 @@ long CubebBackend::data_cb(cubeb_stream* stream, void* user_ptr, void const* /* 
 		const u32 bytes_req = nframes * sample_size;
 		u32 written = std::min(cubeb->m_write_callback(bytes_req, output_buffer), bytes_req);
 		written -= written % sample_size;
+#if defined(__ANDROID__)
+		gd_written_bytes = written;
+#endif
 
 		if (written >= sample_size)
 		{
@@ -479,6 +503,92 @@ long CubebBackend::data_cb(cubeb_stream* stream, void* user_ptr, void const* /* 
 		memset(output_buffer, 0, nframes * cubeb->full_sample_size);
 	}
 
+#if defined(__ANDROID__)
+	if (gd_trace_cb && gd_cb_gap_us >= 35000)
+	{
+		gamedeck_trace::emit("cubeb_callback_gap", "count=%llu\tgap_us=%llu\tnframes=%ld\tplaying=%u\treset=%u", static_cast<unsigned long long>(gd_cb_n), static_cast<unsigned long long>(gd_cb_gap_us), nframes, cubeb->m_playing ? 1u : 0u, cubeb->m_reset_req.observe() ? 1u : 0u);
+	}
+	if (gd_trace_cb && (gd_cb_n <= 8 || (gd_cb_n % 32) == 0))
+	{
+		const u32 channels = std::min<u32>(cubeb->get_channels(), AUDIO_MAX_CHANNELS);
+		const u64 scalar_count = static_cast<u64>(nframes) * channels;
+		u64 zero_count = 0;
+		u64 clip_count = 0;
+		u64 invalid_count = 0;
+		u32 peak_permille = 0;
+		u32 step_permille = 0;
+
+		if (scalar_count && cubeb->get_convert_to_s16())
+		{
+			static thread_local s16 gd_prev[AUDIO_MAX_CHANNELS]{};
+			static thread_local bool gd_prev_valid = false;
+			const s16* samples = static_cast<const s16*>(output_buffer);
+			u32 peak = 0;
+			u32 max_step = 0;
+			for (long frame = 0; frame < nframes; frame++)
+			{
+				for (u32 ch = 0; ch < channels; ch++)
+				{
+					const int v = samples[static_cast<u64>(frame) * channels + ch];
+					const u32 av = static_cast<u32>(v < 0 ? -v : v);
+					peak = std::max(peak, av);
+					zero_count += (v == 0);
+					clip_count += (av >= 32760);
+					if (gd_prev_valid)
+					{
+						const int delta = v - static_cast<int>(gd_prev[ch]);
+						max_step = std::max(max_step, static_cast<u32>(delta < 0 ? -delta : delta));
+					}
+					gd_prev[ch] = static_cast<s16>(v);
+				}
+			}
+			gd_prev_valid = true;
+			peak_permille = (peak * 1000u) / 32768u;
+			step_permille = (max_step * 1000u) / 65535u;
+		}
+		else if (scalar_count)
+		{
+			static thread_local f32 gd_prev[AUDIO_MAX_CHANNELS]{};
+			static thread_local bool gd_prev_valid = false;
+			const f32* samples = static_cast<const f32*>(output_buffer);
+			f64 peak = 0.0;
+			f64 max_step = 0.0;
+			for (long frame = 0; frame < nframes; frame++)
+			{
+				for (u32 ch = 0; ch < channels; ch++)
+				{
+					const f32 v = samples[static_cast<u64>(frame) * channels + ch];
+					if (!std::isfinite(v))
+					{
+						invalid_count++;
+						continue;
+					}
+					const f64 av = std::fabs(static_cast<f64>(v));
+					peak = std::max(peak, av);
+					zero_count += (av < 1e-7);
+					clip_count += (av >= 0.999);
+					if (gd_prev_valid && std::isfinite(gd_prev[ch]))
+					{
+						max_step = std::max(max_step, std::fabs(static_cast<f64>(v) - gd_prev[ch]));
+					}
+					gd_prev[ch] = v;
+				}
+			}
+			gd_prev_valid = true;
+			peak_permille = static_cast<u32>(std::min<f64>(9999.0, peak * 1000.0));
+			step_permille = static_cast<u32>(std::min<f64>(9999.0, max_step * 500.0));
+		}
+
+		const u32 fill_bytes = gd_bytes_req > gd_written_bytes ? gd_bytes_req - gd_written_bytes : 0;
+		const u32 zero_permille = scalar_count ? static_cast<u32>((zero_count * 1000ull) / scalar_count) : 0;
+		const u32 clip_permille = scalar_count ? static_cast<u32>((clip_count * 1000ull) / scalar_count) : 0;
+		const u32 invalid_permille = scalar_count ? static_cast<u32>((invalid_count * 1000ull) / scalar_count) : 0;
+		const u32 fill_permille = gd_bytes_req ? (fill_bytes * 1000u) / gd_bytes_req : 0;
+		gamedeck_trace::emit("cubeb_output_stats",
+			"count=%llu\tnframes=%ld\tchannels=%u\ts16=%u\tpeak_pm=%u\tzero_pm=%u\tclip_pm=%u\tinvalid_pm=%u\tstep_pm=%u\twritten_bytes=%u\tfill_bytes=%u\tfill_pm=%u",
+			static_cast<unsigned long long>(gd_cb_n), nframes, channels, cubeb->get_convert_to_s16() ? 1u : 0u, peak_permille, zero_permille, clip_permille, invalid_permille, step_permille, gd_written_bytes, fill_bytes, fill_permille);
+	}
+#endif
 	return nframes;
 }
 

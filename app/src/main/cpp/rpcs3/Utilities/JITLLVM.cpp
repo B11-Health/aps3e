@@ -797,7 +797,13 @@ jit_compiler::jit_compiler(const std::unordered_map<std::string, u64>& _link, st
 	if (!_link.empty() || !(flags & 0x1))
 	{
 		m_engine->RegisterJITEventListener(llvm::JITEventListener::createIntelJITEventListener());
+#ifndef __ANDROID__
+		// JITAnnouncer::notifyObjectLoaded() asks LLVM for a full debug copy of every
+		// object. On Android this retained hundreds of MiB during cached PPU startup,
+		// while jit_announce() has no normal consumer. Keep execution/cache semantics
+		// identical and omit only this debug-symbol announcement listener.
 		m_engine->RegisterJITEventListener(new JITAnnouncer);
+#endif
 	}
 
 	if (!m_engine)

@@ -14,13 +14,13 @@ namespace rsx
 	namespace nv0039
 	{
 		// Transfer with stride
-		inline void block2d_copy_with_stride(u8* dst, const u8* src, u32 width, u32 height, s32 src_pitch, s32 dst_pitch, u8 src_stride, u8 dst_stride)
+		inline void block2d_copy_with_stride(u8* dst, const u8* src, u32 column_count, u32 row_count, s32 src_pitch, s32 dst_pitch, u8 src_stride, u8 dst_stride)
 		{
-			for (u32 row = 0; row < height; ++row)
+			for (u32 row = 0; row < row_count; ++row)
 			{
 				auto dst_ptr = dst;
 				auto src_ptr = src;
-				while (src_ptr < src + width)
+				for (u32 column = 0; column < column_count; ++column)
 				{
 					*dst_ptr = *src_ptr;
 
@@ -43,6 +43,29 @@ namespace rsx
 			}
 		}
 
+		inline bool validate_buffer_notify(s32 col_count, s32 row_count, s32 in_stride, s32 out_stride)
+		{
+			if (!col_count || !row_count)
+			{
+				rsx_log.warning("NV0039_BUFFER_NOTIFY NOPed out: 2D area is zero.");
+				return false;
+			}
+
+			if (in_stride <= 0 || in_stride > 4)
+			{
+				rsx_log.error("NV0039_BUFFER_NOTIFY NOPed out: Invalid input stride (=%d)", in_stride);
+				return false;
+			}
+
+			if (out_stride <= 0 || out_stride > 4)
+			{
+				rsx_log.error("NV0039_BUFFER_NOTIFY NOPed out: Invalid output stride (=%d)", out_stride);
+				return false;
+			}
+
+			return true;
+		}
+
 		void buffer_notify(context* ctx, u32, u32 arg)
 		{
 			s32 in_pitch = REGS(ctx)->nv0039_input_pitch();
@@ -53,10 +76,8 @@ namespace rsx
 			const u8 in_format = REGS(ctx)->nv0039_input_format();
 			const u32 notify = arg;
 
-			if (!line_count || !line_length)
+			if (!validate_buffer_notify(line_length, line_count, in_format, out_format))
 			{
-				rsx_log.warning("NV0039_BUFFER_NOTIFY NOPed out: pitch(in=0x%x, out=0x%x), line(len=0x%x, cnt=0x%x), fmt(in=0x%x, out=0x%x), notify=0x%x",
-					in_pitch, out_pitch, line_length, line_count, in_format, out_format, notify);
 				return;
 			}
 
@@ -69,11 +90,16 @@ namespace rsx
 			u32 dst_offset = REGS(ctx)->nv0039_output_offset();
 			u32 dst_dma = REGS(ctx)->nv0039_output_location();
 
-			const bool is_block_transfer = (in_pitch == out_pitch && out_pitch + 0u == line_length);
+			const auto in_width_in_bytes = line_length * in_format;
+			const auto out_width_in_bytes = line_length * out_format;
+			const bool is_block_transfer =
+				in_format == 1 && out_format == 1 &&
+				in_pitch + 0u == in_width_in_bytes &&
+				out_pitch + 0u == out_width_in_bytes;
 			const auto read_address = get_address(src_offset, src_dma);
 			const auto write_address = get_address(dst_offset, dst_dma);
-			const auto read_length = in_pitch * (line_count - 1) + line_length;
-			const auto write_length = out_pitch * (line_count - 1) + line_length;
+			const auto read_length = in_pitch * (line_count - 1) + in_width_in_bytes;
+			const auto write_length = out_pitch * (line_count - 1) + out_width_in_bytes;
 
 			RSX(ctx)->invalidate_fragment_program(dst_dma, dst_offset, write_length);
 
@@ -81,7 +107,7 @@ namespace rsx
 				result == rsx::result_zcull_intr)
 			{
 				// This transfer overlaps will zcull data pool
-				if (RSX(ctx)->copy_zcull_stats(read_address, read_length, write_address) == write_length)
+				if (RSX(ctx)->copy_zcull_stats(read_address, read_length, write_address) >= write_length)
 				{
 					// All writes deferred
 					return;
@@ -95,22 +121,42 @@ namespace rsx
 				// res->release(0);
 			});
 
+#ifdef ANDROID
+			// On Android/bionic the CPU copy can fault while reading a main-RAM source that is
+			// concurrently protected by a CPU reservation. When accurate RSX reservation access
+			// is enabled, lock the proven source-read range instead of the destination-preferred
+			// multi-range policy used on hosts where the fault handler can transparently retry.
+			auto res = ::rsx::reservation_lock<true>(read_address, read_length,
+				g_cfg.core.rsx_accurate_res_access && read_address < constants::local_mem_base);
+#else
 			auto res = ::rsx::reservation_lock<true>(write_address, write_length, read_address, read_length);
+#endif
 
 			u8* dst = vm::_ptr<u8>(write_address);
-			const u8* src = vm::_ptr<u8>(read_address);
+			const u8* src_vm = vm::_ptr<u8>(read_address);
 
-			rsx::simple_array<utils::address_range64> flush_mm_ranges =
+			const rsx::simple_array<utils::address_range64> flush_mm_ranges =
 			{
 				utils::address_range64::start_length(reinterpret_cast<u64>(dst), write_length),
-				utils::address_range64::start_length(reinterpret_cast<u64>(src), read_length)
+				utils::address_range64::start_length(reinterpret_cast<u64>(src_vm), read_length)
 			};
 			rsx::mm_flush(flush_mm_ranges);
+
+#ifdef ANDROID
+			// Android may leave either main RAM or RSX local memory protected on the normal VM
+			// alias while host-side cache/reservation tracking is active. mm_flush above performs
+			// the required synchronization; use the always-RW sudo alias for this read-only copy
+			// so bionic memcpy/memmove cannot fault on a still-protected normal alias.
+			// Keep src_vm only for mm_flush bookkeeping.
+			const u8* src = vm::get_super_ptr<const u8>(read_address);
+#else
+			const u8* src = src_vm;
+#endif
 
 			const bool is_overlapping = dst_dma == src_dma && [&]() -> bool
 			{
 				const u32 src_max = src_offset + read_length;
-				const u32 dst_max = dst_offset + (out_pitch * (line_count - 1) + line_length);
+				const u32 dst_max = dst_offset + write_length;
 				return (src_offset >= dst_offset && src_offset < dst_max) ||
 				 (dst_offset >= src_offset && dst_offset < src_max);
 			}();

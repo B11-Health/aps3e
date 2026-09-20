@@ -117,7 +117,9 @@ void decode_16b(const in uint texel_id, in uint x, const in uint y, const in uin
 		accumulator = bitfieldInsert(accumulator, src_value, int(subword << 4), 16);
 	}
 
-	data_out[texel_id / 2] = %f(accumulator);
+	// GTA V regression A/B: keep the packed 16-bit pair in source byte layout.
+	// PR #17720 applied the whole-word transform here; reverting only this 16-bit write.
+	data_out[texel_id / 2] = accumulator;
 }
 
 #elif USE_8BIT_ADDRESSING

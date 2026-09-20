@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Utilities/File.h"
+#include "Utilities/Thread.h"
 #include "Utilities/lockless.h"
 #include "Utilities/address_range.h"
 #include "util/bit_set.hpp"
@@ -10,6 +11,7 @@
 #include <memory>
 #include <string>
 #include <deque>
+#include <mutex>
 
 // Helper class
 class spu_cache
@@ -85,6 +87,11 @@ public:
 	// Compiled function pointer
 	atomic_t<spu_function_t> compiled = nullptr;
 
+#ifdef ARCH_ARM64
+	// Compilation ownership is independent of disk membership and LS address.
+	atomic_t<u32> compiling = 0;
+#endif
+
 	// Ubertrampoline generated for this item when it was latest
 	atomic_t<spu_function_t> trampoline = nullptr;
 
@@ -101,6 +108,26 @@ public:
 	spu_item& operator=(const spu_item&) = delete;
 };
 
+#ifdef ARCH_ARM64
+// Releases ownership on return, exception, or a named-thread fatal exit.
+class spu_compile_guard
+{
+	spu_item& m_item;
+	bool m_owned = false;
+	thread_ctrl::scoped_error_callback m_error_cleanup;
+
+	void release() noexcept;
+	static void on_error(void* arg) { static_cast<spu_compile_guard*>(arg)->release(); }
+
+public:
+	explicit spu_compile_guard(spu_item& item);
+	~spu_compile_guard();
+	spu_compile_guard(const spu_compile_guard&) = delete;
+	spu_compile_guard& operator=(const spu_compile_guard&) = delete;
+	bool owns() const { return m_owned; }
+};
+#endif
+
 // Helper class
 class spu_runtime
 {
@@ -109,6 +136,11 @@ class spu_runtime
 
 	// Debug module output location
 	std::string m_cache_path;
+
+#ifdef ARCH_ARM64
+	// Dormant entries can finish in any order; serialize complete snapshots.
+	std::mutex m_trampoline_mutex;
+#endif
 
 public:
 	// Trampoline to spu_recompiler_base::dispatch

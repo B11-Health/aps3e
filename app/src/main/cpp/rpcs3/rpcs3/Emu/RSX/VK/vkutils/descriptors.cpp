@@ -234,12 +234,24 @@ namespace vk
 
 		do
 		{
-			for (u32 index = 0; index < m_device_subpools.size(); ++index)
+			// GC now runs on a worker thread. Serialize subpool reuse against reset().
 			{
-				if (!m_device_subpools[index].busy)
+				reader_lock lock(m_subpool_lock);
+
+				for (u32 index = 0; index < m_device_subpools.size(); ++index)
 				{
-					m_current_subpool_index = index;
-					goto done; // Nested break
+					if (!m_device_subpools[index].busy)
+					{
+						m_current_subpool_index = index;
+						m_device_subpools[m_current_subpool_index].busy = VK_TRUE;
+						m_current_pool_handle = m_device_subpools[m_current_subpool_index].handle;
+						break;
+					}
+				}
+
+				if (m_current_subpool_index != umax)
+				{
+					return;
 				}
 			}
 
@@ -263,16 +275,13 @@ namespace vk
 			m_device_subpools.push_back(
 			{
 				.handle = subpool,
-				.busy = VK_FALSE
+				.busy = VK_TRUE
 			});
 
 			m_current_subpool_index = m_device_subpools.size() - 1;
+			m_current_pool_handle = m_device_subpools[m_current_subpool_index].handle;
 
 		} while (m_current_subpool_index == umax);
-
-	done:
-		m_device_subpools[m_current_subpool_index].busy = VK_TRUE;
-		m_current_pool_handle = m_device_subpools[m_current_subpool_index].handle;
 	}
 
 	descriptor_set::descriptor_set(VkDescriptorSet set)

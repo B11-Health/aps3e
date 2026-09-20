@@ -184,6 +184,24 @@ static u32 enc_rr(u32 opcode, u32 rt, u32 ra, u32 rb)
 	return (opcode << 21) | ((rb & 0x7F) << 14) | ((ra & 0x7F) << 7) | (rt & 0x7F);
 }
 
+// Encode a four-register instruction: rt4 = f(ra, rb, rc).
+// Decoder magn=7 means the top nibble is the primary opcode and rt4
+// occupies the lower seven bits of the decoder key.
+static u32 enc_rr4(u32 opcode4, u32 rt4, u32 ra, u32 rb, u32 rc)
+{
+	return ((opcode4 & 0xF) << 28) | ((rt4 & 0x7F) << 21) |
+		((rb & 0x7F) << 14) | ((ra & 0x7F) << 7) | (rc & 0x7F);
+}
+
+// Encode an i8-immediate instruction: rt = f(ra, i8).
+// Decoder entries for these use magn=1: value10 occupies bits 31:22 and
+// the high bit of i8 occupies bit 21 (the low bit of spu_decode()).
+static u32 enc_ri8(u32 value10, u32 rt, u32 ra, u32 i8)
+{
+	return (value10 << 22) | ((i8 & 0xFF) << 14) |
+		((ra & 0x7F) << 7) | (rt & 0x7F);
+}
+
 // Encode si10-immediate instruction: rt = f(ra, si10).
 // Decoder entries for these use magn=3 (value8 at bits 24:31), and the 10-bit
 // si10 occupies bits 14:23 (its top 3 bits fold into the low opcode bits).
@@ -363,6 +381,23 @@ static v128 expected_AHI(const v128& ra, s32 si10)
 {
 	v128 r;
 	for (int i = 0; i < 8; i++) r._u16[i] = ra._u16[i] + static_cast<u16>(si10);
+	return r;
+}
+
+static v128 expected_ANDHI(const v128& ra, s32 si10)
+{
+	v128 r;
+	const u16 imm = static_cast<u16>(static_cast<s16>(si10));
+	for (int i = 0; i < 8; i++) r._u16[i] = ra._u16[i] & imm;
+	return r;
+}
+
+static v128 expected_SHLHI(const v128& ra, s32 i7)
+{
+	v128 r;
+	const u32 sh = static_cast<u32>(i7) & 0x1f;
+	for (int i = 0; i < 8; i++)
+		r._u16[i] = sh >= 16 ? 0 : static_cast<u16>(ra._u16[i] << sh);
 	return r;
 }
 
@@ -742,6 +777,35 @@ static v128 expected_GB(const v128& ra, const v128& rb)
 	for (int i = 0; i < 32; i++)
 		if (ra._u32[i / 32] & (1u << (i % 32))) mask |= 1u << i;
 	r._u32[3] = mask;
+	return r;
+}
+
+static v128 expected_GBH(const v128& ra, const v128& rb)
+{
+	(void)rb;
+	v128 r{};
+	u32 mask = 0;
+	for (int i = 0; i < 8; i++)
+		if (ra._u16[i] & 1u) mask |= 1u << i;
+	r._u32[3] = mask;
+	return r;
+}
+
+static v128 expected_FSMH(const v128& ra, const v128& rb)
+{
+	(void)rb;
+	v128 r;
+	const u16 bits = ra._u16[7];
+	for (int i = 0; i < 8; i++)
+		r._u16[i] = (bits & (1u << i)) ? 0xffffu : 0u;
+	return r;
+}
+
+static v128 expected_CBX(const v128& ra, const v128& rb)
+{
+	v128 r = v128::from64(0x18191A1B1C1D1E1Full, 0x1011121314151617ull);
+	const s32 t = ~static_cast<s32>(rb._u32[3] + ra._u32[3]) & 0xf;
+	r._u8[t] = 0x03;
 	return r;
 }
 
@@ -1394,6 +1458,160 @@ static test_result_t test_ri7_instruction(const char* name, u32 opcode, s32 i7,
 	return result;
 }
 
+static test_result_t test_fs_gta_blocker()
+{
+	test_result_t result{"FS", 4, 0, 0};
+	const v128 ra[4] =
+	{
+		v128::fromf32p(4.0f),
+		v128::fromf32p(-8.0f),
+		v128::from32(std::bit_cast<u32>(1.0f), std::bit_cast<u32>(2.0f), std::bit_cast<u32>(4.0f), std::bit_cast<u32>(8.0f)),
+		v128::from32(std::bit_cast<u32>(-1.0f), std::bit_cast<u32>(0.5f), std::bit_cast<u32>(16.0f), std::bit_cast<u32>(-32.0f))
+	};
+	const v128 rb[4] =
+	{
+		v128::fromf32p(1.0f),
+		v128::fromf32p(-2.0f),
+		v128::from32(std::bit_cast<u32>(0.5f), std::bit_cast<u32>(1.0f), std::bit_cast<u32>(2.0f), std::bit_cast<u32>(4.0f)),
+		v128::from32(std::bit_cast<u32>(1.0f), std::bit_cast<u32>(-0.5f), std::bit_cast<u32>(8.0f), std::bit_cast<u32>(-16.0f))
+	};
+
+	for (int c = 0; c < 4; c++)
+	{
+		test_input_t input{ra[c], rb[c], {}};
+		v128 actual{};
+		const bool ok = run_jit_test(enc_rr(0x2c5, 3, 0, 1), input, &actual, 3);
+		v128 expected{};
+		for (int i = 0; i < 4; i++) expected._f[i] = ra[c]._f[i] - rb[c]._f[i];
+
+		if (ok && memcmp(&actual, &expected, sizeof(v128)) == 0)
+			result.passed++;
+		else
+		{
+			result.failed++;
+			printf("  FS case %d: expected ", c); print_v128(expected);
+			printf("\n    actual   "); print_v128(actual); printf("\n");
+		}
+	}
+
+	return result;
+}
+
+static test_result_t test_fms_gta_blocker()
+{
+	test_result_t result{"FMS", 4, 0, 0};
+	const v128 ra[4] =
+	{
+		v128::fromf32p(2.0f),
+		v128::fromf32p(-4.0f),
+		v128::from32(std::bit_cast<u32>(1.0f), std::bit_cast<u32>(2.0f), std::bit_cast<u32>(4.0f), std::bit_cast<u32>(8.0f)),
+		v128::from32(std::bit_cast<u32>(-1.0f), std::bit_cast<u32>(0.5f), std::bit_cast<u32>(16.0f), std::bit_cast<u32>(-32.0f))
+	};
+	const v128 rb[4] =
+	{
+		v128::fromf32p(4.0f),
+		v128::fromf32p(-2.0f),
+		v128::from32(std::bit_cast<u32>(2.0f), std::bit_cast<u32>(4.0f), std::bit_cast<u32>(0.5f), std::bit_cast<u32>(0.25f)),
+		v128::from32(std::bit_cast<u32>(-2.0f), std::bit_cast<u32>(8.0f), std::bit_cast<u32>(0.25f), std::bit_cast<u32>(-0.5f))
+	};
+	const v128 rc[4] =
+	{
+		v128::fromf32p(1.0f),
+		v128::fromf32p(2.0f),
+		v128::from32(std::bit_cast<u32>(1.0f), std::bit_cast<u32>(2.0f), std::bit_cast<u32>(1.0f), std::bit_cast<u32>(1.0f)),
+		v128::from32(std::bit_cast<u32>(1.0f), std::bit_cast<u32>(1.0f), std::bit_cast<u32>(2.0f), std::bit_cast<u32>(4.0f))
+	};
+
+	for (int c = 0; c < 4; c++)
+	{
+		test_input_t input{ra[c], rb[c], rc[c]};
+		v128 actual{};
+		const bool ok = run_jit_test(enc_rr4(0xf, 3, 0, 1, 2), input, &actual, 3);
+		v128 expected{};
+		for (int i = 0; i < 4; i++) expected._f[i] = (ra[c]._f[i] * rb[c]._f[i]) - rc[c]._f[i];
+
+		if (ok && memcmp(&actual, &expected, sizeof(v128)) == 0)
+			result.passed++;
+		else
+		{
+			result.failed++;
+			printf("  FMS case %d: expected ", c); print_v128(expected);
+			printf("\n    actual    "); print_v128(actual); printf("\n");
+		}
+	}
+
+	return result;
+}
+
+
+static test_result_t test_csflt_gta_blocker()
+{
+	test_result_t result{"CSFLT", 4, 0, 0};
+	const v128 inputs[4] =
+	{
+		v128::from32(0u, 1u, static_cast<u32>(-1), 1024u),
+		v128::from32(static_cast<u32>(-2048), 32767u, static_cast<u32>(-32768), 65535u),
+		v128::from32(123456u, static_cast<u32>(-123456), 0x007fffffu, static_cast<u32>(-0x007fffff)),
+		v128::from32(42u, static_cast<u32>(-42), 4096u, static_cast<u32>(-4096))
+	};
+
+	// i8=155 is the identity scale (2^(155-155)). Keeping the vector finite,
+	// exactly representable and in-range makes this regression deterministic.
+	for (int c = 0; c < 4; c++)
+	{
+		test_input_t input{inputs[c], {}, {}};
+		v128 actual{};
+		const bool ok = run_jit_test(enc_ri8(0x1da, 2, 0, 155), input, &actual, 2);
+		v128 expected{};
+		for (int i = 0; i < 4; i++) expected._f[i] = static_cast<float>(inputs[c]._s32[i]);
+
+		if (ok && memcmp(&actual, &expected, sizeof(v128)) == 0)
+			result.passed++;
+		else
+		{
+			result.failed++;
+			printf("  CSFLT case %d: expected ", c); print_v128(expected);
+			printf("\n    actual      "); print_v128(actual); printf("\n");
+		}
+	}
+
+	return result;
+}
+
+static test_result_t test_cflts_gta_blocker()
+{
+	test_result_t result{"CFLTS", 4, 0, 0};
+	const v128 inputs[4] =
+	{
+		v128::from32(std::bit_cast<u32>(0.0f), std::bit_cast<u32>(1.0f), std::bit_cast<u32>(-1.0f), std::bit_cast<u32>(7.75f)),
+		v128::from32(std::bit_cast<u32>(-7.75f), std::bit_cast<u32>(123.875f), std::bit_cast<u32>(-123.875f), std::bit_cast<u32>(32767.5f)),
+		v128::from32(std::bit_cast<u32>(-32768.5f), std::bit_cast<u32>(0.5f), std::bit_cast<u32>(-0.5f), std::bit_cast<u32>(65535.25f)),
+		v128::from32(std::bit_cast<u32>(42.99f), std::bit_cast<u32>(-42.99f), std::bit_cast<u32>(4096.0f), std::bit_cast<u32>(-4096.0f))
+	};
+
+	// i8=173 is the identity scale (2^(173-173)). Values stay finite and far
+	// from saturation so the expected truncation-to-s32 result is unambiguous.
+	for (int c = 0; c < 4; c++)
+	{
+		test_input_t input{inputs[c], {}, {}};
+		v128 actual{};
+		const bool ok = run_jit_test(enc_ri8(0x1d8, 2, 0, 173), input, &actual, 2);
+		v128 expected{};
+		for (int i = 0; i < 4; i++) expected._s32[i] = static_cast<s32>(inputs[c]._f[i]);
+
+		if (ok && memcmp(&actual, &expected, sizeof(v128)) == 0)
+			result.passed++;
+		else
+		{
+			result.failed++;
+			printf("  CFLTS case %d: expected ", c); print_v128(expected);
+			printf("\n    actual      "); print_v128(actual); printf("\n");
+		}
+	}
+
+	return result;
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -1504,6 +1722,24 @@ int main(int argc, char* argv[])
 	results.push_back(test_wrch_tagmask());
 	results.push_back(test_rdch_tagstat());
 	results.push_back(test_tag_completion_chain());
+
+	// === GTA/SPURS blocker regression coverage ===
+	// These opcodes were observed as real GTA V SPU boundaries on Android.
+	results.push_back(test_ri_instruction("ANDHI", 0x15, -1, expected_ANDHI));
+	results.push_back(test_ri_instruction("ANDHI", 0x15, 0x155, expected_ANDHI));
+	results.push_back(test_ri7_instruction("SHLHI", 0x7f, 1, expected_SHLHI));
+	results.push_back(test_ri7_instruction("SHLHI", 0x7f, 15, expected_SHLHI));
+	results.push_back(test_rr_instruction("GBH", 0x1b1, expected_GBH));
+	results.push_back(test_rr_instruction("FSMH", 0x1b5, expected_FSMH));
+	results.push_back(test_rr_instruction("CBX", 0x1d4, expected_CBX));
+	results.push_back(test_fs_gta_blocker());
+	results.push_back(test_fms_gta_blocker());
+	results.push_back(test_csflt_gta_blocker());
+	results.push_back(test_cflts_gta_blocker());
+
+	// On ARM64 CSFLT/CFLTS execute through ASMJIT's interpreter fall(op), so
+	// these are controlled auxiliary regression vectors, not SPU LLVM proof.
+	// GTA runtime uses SPU LLVM and must be gated separately by core preflight.
 
 	// === SPURS-path native instructions (untested before) ===
 	results.push_back(test_ri_instruction("CEQBI", 0x7e, 0x42, expected_CEQBI));

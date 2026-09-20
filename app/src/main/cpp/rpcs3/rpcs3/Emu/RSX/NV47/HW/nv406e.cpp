@@ -24,7 +24,9 @@ namespace rsx
 		void semaphore_acquire(context* ctx, u32 /*reg*/, u32 arg)
 		{
 			RSX(ctx)->sync_point_request.release(true);
-			const u32 addr = get_address(REGS(ctx)->semaphore_offset_406e(), REGS(ctx)->semaphore_context_dma_406e());
+			const u32 gd_offset = REGS(ctx)->semaphore_offset_406e();
+			const u32 gd_ctxt = REGS(ctx)->semaphore_context_dma_406e();
+			const u32 addr = get_address(gd_offset, gd_ctxt);
 
 #if defined(__ANDROID__)
 			if (addr == RSX(ctx)->label_addr + 0x480)
@@ -42,6 +44,7 @@ namespace rsx
 			RSX(ctx)->m_graphics_state |= rsx::pipeline_state::fragment_program_needs_rehash;
 
 			const auto& sema = vm::_ref<RsxSemaphore>(addr);
+			const auto& atomic_sema = vm::_ref<atomic_t<RsxSemaphore>>(addr);
 
 			if (sema == arg)
 			{
@@ -61,6 +64,11 @@ namespace rsx
 
 			u64 start = get_system_time();
 			u64 last_check_val = start;
+
+#if defined(__ANDROID__)
+			gamedeck_trace::emit("nv406e_wait_begin", "addr=0x%08x\toffset=0x%08x\tctxt=0x%08x\texpected=%u\tobserved=%u\tget=0x%08x\tput=0x%08x",
+				addr, gd_offset, gd_ctxt, arg, vm::read32(addr), RSX(ctx)->ctrl ? +RSX(ctx)->ctrl->get : 0u, RSX(ctx)->ctrl ? +RSX(ctx)->ctrl->put : 0u);
+#endif
 
 			while (sema != arg)
 			{
@@ -92,9 +100,24 @@ namespace rsx
 					}
 				}
 
-				RSX(ctx)->cpu_wait({});
+				if (RSX(ctx)->external_interrupt_lock ||
+					(RSX(ctx)->state & (cpu_flag::dbg_global_pause + cpu_flag::exit)) == cpu_flag::dbg_global_pause)
+				{
+					RSX(ctx)->cpu_wait({});
+					continue;
+				}
+
+				// Current upstream RPCS3 semantics: service backend work while waiting,
+				// then wait on the actual semaphore cacheline. On ARM64 this uses WFE
+				// instead of continuously yielding the RSX host thread.
+				RSX(ctx)->on_semaphore_acquire_wait();
+				utils::spin_on_cacheline_once(atomic_sema, sema, 100);
 			}
 
+#if defined(__ANDROID__)
+			gamedeck_trace::emit("nv406e_wait_end", "addr=0x%08x\texpected=%u\tobserved=%u\tduration_us=%llu\tget=0x%08x\tput=0x%08x",
+				addr, arg, vm::read32(addr), static_cast<unsigned long long>(get_system_time() - start), RSX(ctx)->ctrl ? +RSX(ctx)->ctrl->get : 0u, RSX(ctx)->ctrl ? +RSX(ctx)->ctrl->put : 0u);
+#endif
 			RSX(ctx)->fifo_wake_delay();
 			RSX(ctx)->performance_counters.idle_time += (get_system_time() - start);
 		}

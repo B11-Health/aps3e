@@ -122,6 +122,13 @@ enum : u32
 	PORT_BUFFER_TAG_LAST_8CH = AUDIO_BLOCK_SIZE_8CH - 1,
 	PORT_BUFFER_TAG_DELTA_8CH = PORT_BUFFER_TAG_LAST_8CH / (PORT_BUFFER_TAG_COUNT - 1),
 	PORT_BUFFER_TAG_FIRST_8CH = PORT_BUFFER_TAG_LAST_8CH % (PORT_BUFFER_TAG_COUNT - 1),
+
+	// Buffer tags for 8-channel ports land on channels 2..7. A game configured for stereo may
+	// legitimately write only front L/R of that port, so add front-right marks to distinguish
+	// valid front-only audio from a truly untouched block while buffering is enabled.
+	PORT_BUFFER_MARK_CHANNEL = 1,
+	PORT_BUFFER_MARK_DELTA_SAMPLE = (AUDIO_BUFFER_SAMPLES - 1) / (PORT_BUFFER_TAG_COUNT - 1),
+	PORT_FRONT_ONLY_SETTLE_PERIODS = 8,
 };
 
 enum class audio_port_state : u32
@@ -187,6 +194,11 @@ struct audio_port
 	// Tags
 	u32 prev_touched_tag_nr = 0;
 	f32 last_tag_value[PORT_BUFFER_TAG_COUNT] = { 0 };
+
+	u32 mark_position(u32 tag_nr) const
+	{
+		return tag_nr * PORT_BUFFER_MARK_DELTA_SAMPLE * num_channels + PORT_BUFFER_MARK_CHANNEL;
+	}
 
 	void tag(s32 offset = 0);
 
@@ -413,6 +425,9 @@ public:
 	f32 m_average_playtime = 0.0f;
 	bool m_backend_failed = false;
 	bool m_audio_should_restart = false;
+
+	std::array<bool, AUDIO_PORT_COUNT> m_front_only_reported{};
+	std::array<u8, AUDIO_PORT_COUNT> m_periods_without_tag{};
 
 	void operator()();
 

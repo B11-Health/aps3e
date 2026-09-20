@@ -5,6 +5,7 @@
 #include "Emu/RSX/Overlays/overlay_manager.h"
 #include "Emu/RSX/Overlays/overlay_debug_overlay.h"
 #include "Emu/Cell/Modules/cellVideoOut.h"
+#include "Emu/GameDeckTrace.h"
 
 #include "upscalers/bilinear_pass.hpp"
 #include "upscalers/fsr_pass.h"
@@ -160,7 +161,22 @@ void VKGSRender::present(vk::frame_context_t *ctx)
 
 	if (!swapchain_unavailable)
 	{
-		switch (VkResult error = m_swapchain->present(ctx->present_wait_semaphore, ctx->present_image))
+#if defined(__ANDROID__)
+		const bool gd_trace_present = gamedeck_trace::enabled();
+		const u64 gd_present_begin_ns = gd_trace_present ? gamedeck_trace::now_ns() : 0;
+#endif
+		const VkResult error = m_swapchain->present(ctx->present_wait_semaphore, ctx->present_image);
+#if defined(__ANDROID__)
+		if (gd_trace_present)
+		{
+			const u64 gd_present_us = (gamedeck_trace::now_ns() - gd_present_begin_ns) / 1000;
+			if (gd_present_us >= 8000)
+			{
+				gamedeck_trace::emit("vk_present_slow", "elapsed_us=%llu\timage=%u\tresult=%d", static_cast<unsigned long long>(gd_present_us), ctx->present_image, static_cast<int>(error));
+			}
+		}
+#endif
+		switch (error)
 		{
 		case VK_SUCCESS:
 			break;
@@ -219,6 +235,10 @@ void VKGSRender::advance_queued_frames()
 void VKGSRender::queue_swap_request()
 {
 	ensure(!m_current_frame->swap_command_buffer);
+#if defined(__ANDROID__)
+	const bool gd_trace_submit = gamedeck_trace::enabled();
+	const u64 gd_submit_begin_ns = gd_trace_submit ? gamedeck_trace::now_ns() : 0;
+#endif
 	m_current_frame->swap_command_buffer = m_current_command_buffer;
 
 	if (m_swapchain->is_headless())
@@ -233,6 +253,17 @@ void VKGSRender::queue_swap_request()
 			m_current_frame->present_wait_semaphore,
 			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
 	}
+
+#if defined(__ANDROID__)
+	if (gd_trace_submit)
+	{
+		const u64 gd_submit_us = (gamedeck_trace::now_ns() - gd_submit_begin_ns) / 1000;
+		if (gd_submit_us >= 8000)
+		{
+			gamedeck_trace::emit("vk_submit_slow", "elapsed_us=%llu\timage=%u", static_cast<unsigned long long>(gd_submit_us), m_current_frame->present_image);
+		}
+	}
+#endif
 
 	// Set up a present request for this frame as well
 	present(m_current_frame);
@@ -429,6 +460,10 @@ vk::viewable_image* VKGSRender::get_present_source(/* inout */ vk::present_surfa
 
 void VKGSRender::flip(const rsx::display_flip_info_t& info)
 {
+#if defined(__ANDROID__)
+	const bool gd_trace_flip = gamedeck_trace::enabled();
+	const u64 gd_flip_begin_ns = gd_trace_flip ? gamedeck_trace::now_ns() : 0;
+#endif
 	// Check swapchain condition/status
 	if (!m_swapchain->supports_automatic_wm_reports())
 	{
@@ -564,6 +599,22 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 			.eye = 0
 		};
 		image_to_flip = get_present_source(&present_info, avconfig);
+#if defined(__ANDROID__)
+		if (gd_trace_flip)
+		{
+			static thread_local u64 gd_present_source_count = 0;
+			const u64 gd_present_source_n = ++gd_present_source_count;
+			if (gd_present_source_n <= 16 || (gd_present_source_n & 0x3fu) == 0)
+			{
+				gamedeck_trace::emit("vk_present_source",
+					"count=%llu\tbuffer=%u\taddr=0x%08x\toffset=0x%08x\twidth=%u\theight=%u\tpitch=%u\tav_format=%u\tfound=%u\timage_width=%u\timage_height=%u\timage_format=%u",
+					static_cast<unsigned long long>(gd_present_source_n), info.buffer, present_info.address, display_buffers[info.buffer].offset,
+					present_info.width, present_info.height, present_info.pitch, present_info.format, image_to_flip ? 1u : 0u,
+					image_to_flip ? image_to_flip->width() : 0u, image_to_flip ? image_to_flip->height() : 0u,
+					image_to_flip ? static_cast<u32>(image_to_flip->format()) : 0u);
+			}
+		}
+#endif
 
 		if (avconfig.stereo_enabled) [[unlikely]]
 		{
@@ -600,7 +651,12 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 	ensure(m_current_frame->present_image == umax);
 	ensure(m_current_frame->swap_command_buffer == nullptr);
 
+#ifdef ANDROID
+	u64 timeout = UINT64_MAX;
+	const u64 gd_acquire_begin_ns = gd_trace_flip ? gamedeck_trace::now_ns() : 0;
+#else
 	u64 timeout = m_swapchain->get_swap_image_count() <= 2? 0ull: 100000000ull;
+#endif
 	while (VkResult status = m_swapchain->acquire_next_swapchain_image(m_current_frame->acquire_signal_semaphore, timeout, &m_current_frame->present_image))
 	{
 		switch (status)
@@ -644,6 +700,17 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 			break;
 		}
 	}
+
+#if defined(__ANDROID__)
+	if (gd_trace_flip)
+	{
+		const u64 gd_acquire_us = (gamedeck_trace::now_ns() - gd_acquire_begin_ns) / 1000;
+		if (gd_acquire_us >= 8000)
+		{
+			gamedeck_trace::emit("vk_acquire_wait", "elapsed_us=%llu\timage=%u\tswap_images=%u", static_cast<unsigned long long>(gd_acquire_us), m_current_frame->present_image, m_swapchain->get_swap_image_count());
+		}
+	}
+#endif
 
 	// Confirm that the driver did not silently fail
 	ensure(m_current_frame->present_image != umax);
@@ -979,6 +1046,16 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 	}
 
 	queue_swap_request();
+#if defined(__ANDROID__)
+	if (gd_trace_flip)
+	{
+		const u64 gd_flip_us = (gamedeck_trace::now_ns() - gd_flip_begin_ns) / 1000;
+		if (gd_flip_us >= 50000)
+		{
+			gamedeck_trace::emit("vk_flip_slow", "elapsed_us=%llu\tbuffer=%u\tdraws=%u\tsubmits=%u", static_cast<unsigned long long>(gd_flip_us), info.buffer, info.stats.draw_calls, info.stats.submit_count);
+		}
+	}
+#endif
 
 	m_frame_stats.flip_time = m_profiler.duration();
 

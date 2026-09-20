@@ -1292,6 +1292,8 @@ extern bool ppu_patch(u32 addr, u32 value)
 		return false;
 	}
 
+	ensure(!cpu_thread::get_current());
+
 	vm::writer_lock rlock;
 
 	if (!vm::check_addr(addr))
@@ -3030,18 +3032,6 @@ static T ppu_load_acquire_reservation(ppu_thread& ppu, u32 addr)
 {
 	perf_meter<"LARX"_u32> perf0;
 
-#if defined(__ANDROID__)
-	if (ppu.cia == 0x023d1744u)
-	{
-		static thread_local u64 gd_wave_larx_count = 0;
-		const u64 gd_count = ++gd_wave_larx_count;
-		if (gd_count <= 8 || (gd_count & 0x3fffu) == 0)
-		{
-			gamedeck_trace::emit("waveplayer_ldarx_runtime", "count=%llu\tppu=0x%08x\tcia=0x%08x\taddr=0x%08x\tfull_rdata=%u", static_cast<unsigned long long>(gd_count), ppu.id, ppu.cia, addr, ppu.use_full_rdata ? 1u : 0u);
-		}
-	}
-#endif
-
 	// Do not allow stores accessed from the same cache line to past reservation load
 	atomic_fence_seq_cst();
 
@@ -3276,6 +3266,7 @@ static bool ppu_store_reservation(ppu_thread& ppu, u32 addr, u64 reg_value)
 			auto range_lock = vm::alloc_range_lock();
 			bool success = false;
 			{
+				ppu.state += cpu_flag::wait; // for vm::writer_lock
 				rsx::reservation_lock rsx_lock(addr, 128);
 
 				auto& super_data = *vm::get_super_ptr<spu_rdata_t>(addr);
@@ -3298,6 +3289,7 @@ static bool ppu_store_reservation(ppu_thread& ppu, u32 addr, u64 reg_value)
 			}
 			vm::free_range_lock(range_lock);
 
+			static_cast<void>(ppu.test_stopped());
 			return success;
 		}
 

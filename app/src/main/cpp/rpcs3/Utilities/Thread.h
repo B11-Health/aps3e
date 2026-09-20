@@ -213,6 +213,55 @@ class thread_ctrl final
 	static std::string get_name_cached();
 
 public:
+	// Cleanup for emergency_exit()/silent_exit(), which do not unwind C++
+	// scopes in no-exceptions builds. Nested handlers preserve the thread's
+	// original error callback. Normal scope exit only restores the callback.
+	class scoped_error_callback
+	{
+		inline static thread_local scoped_error_callback* s_current = nullptr;
+		scoped_error_callback* m_previous;
+		void (*m_previous_callback)();
+		void (*m_cleanup)(void*);
+		void* m_arg;
+		bool m_active = true;
+
+		void reset() noexcept
+		{
+			if (m_active)
+			{
+				s_current = m_previous;
+				g_tls_error_callback = m_previous_callback;
+				m_active = false;
+			}
+		}
+
+		static void on_error()
+		{
+			auto& scope = *s_current;
+			scope.reset();
+			scope.m_cleanup(scope.m_arg);
+			if (scope.m_previous_callback)
+			{
+				scope.m_previous_callback();
+			}
+		}
+
+	public:
+		scoped_error_callback(void (*cleanup)(void*), void* arg) noexcept
+			: m_previous(s_current)
+			, m_previous_callback(g_tls_error_callback)
+			, m_cleanup(cleanup)
+			, m_arg(arg)
+		{
+			s_current = this;
+			g_tls_error_callback = on_error;
+		}
+
+		~scoped_error_callback() { reset(); }
+		scoped_error_callback(const scoped_error_callback&) = delete;
+		scoped_error_callback& operator=(const scoped_error_callback&) = delete;
+	};
+
 	// Get current thread name
 	static std::string get_name()
 	{

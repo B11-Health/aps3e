@@ -4,6 +4,7 @@
 #include "Emu/IdManager.h"
 #include "Emu/IPC.h"
 #include "Emu/System.h"
+#include "Emu/GameDeckTrace.h"
 
 #include "Emu/Cell/ErrorCodes.h"
 #include "Emu/Cell/PPUThread.h"
@@ -13,6 +14,9 @@
 #include "util/asm.hpp"
 
 LOG_CHANNEL(sys_event);
+
+// QA-only: correlate GTA V main-PPU indefinite event waits with their producer.
+static atomic_t<u32> g_gd_intro_event_queue_id = 0;
 
 lv2_event_queue::lv2_event_queue(u32 protocol, s32 type, s32 size, u64 name, u64 ipc_key) noexcept
 	: id(idm::last_id<lv2_event_queue>())
@@ -144,6 +148,18 @@ CellError lv2_event_queue::send(lv2_event event, bool* notified_thread, lv2_even
 
 	std::lock_guard lock(mutex);
 
+	const bool gd_intro_target = id == +g_gd_intro_event_queue_id && +g_gd_intro_event_queue_id != 0;
+	if (gd_intro_target)
+	{
+		auto* gd_cpu = cpu_thread::get_current();
+		const std::string gd_sender = gd_cpu ? gd_cpu->get_name() : std::string{};
+		gamedeck_trace::emit("intro_event_send_enter",
+			"queue=0x%08x\tsender=%s\tdepth=%llu\tpq=0x%08x\tsq=0x%08x\tsrc=0x%016llx\td1=0x%016llx\td2=0x%016llx\td3=0x%016llx",
+			id, gd_sender.c_str(), static_cast<unsigned long long>(events.size()), pq ? pq->id : 0u, sq ? sq->id : 0u,
+			static_cast<unsigned long long>(std::get<0>(event)), static_cast<unsigned long long>(std::get<1>(event)),
+			static_cast<unsigned long long>(std::get<2>(event)), static_cast<unsigned long long>(std::get<3>(event)));
+	}
+
 	if (!exists)
 	{
 		return CELL_ENOTCONN;
@@ -182,6 +198,10 @@ CellError lv2_event_queue::send(lv2_event event, bool* notified_thread, lv2_even
 		std::tie(ppu.gpr[4], ppu.gpr[5], ppu.gpr[6], ppu.gpr[7]) = event;
 
 		awake(&ppu);
+		if (gd_intro_target)
+		{
+			gamedeck_trace::emit("intro_event_send_awake", "queue=0x%08x\twaiter=0x%08x", id, ppu.id);
+		}
 
 		if (port && ppu.prio.load().prio < ensure(cpu_thread::get_current<ppu_thread>())->prio.load().prio)
 		{
@@ -468,6 +488,15 @@ error_code sys_event_queue_receive(ppu_thread& ppu, u32 equeue_id, vm::ptr<sys_e
 
 	sys_event.trace("sys_event_queue_receive(equeue_id=0x%x, *0x%x, timeout=0x%llx)", equeue_id, dummy_event, timeout);
 
+	const bool gd_intro_wait = (dummy_event.addr() & 0xfffff000u) == 0xd003f000u;
+	if (gd_intro_wait)
+	{
+		g_gd_intro_event_queue_id = equeue_id;
+		gamedeck_trace::emit("intro_event_wait_enter",
+			"ppu=0x%08x\tcia=0x%08x\tqueue=0x%08x\tevent_ptr=0x%08x\ttimeout=%llu",
+			ppu.id, ppu.cia, equeue_id, dummy_event.addr(), static_cast<unsigned long long>(timeout));
+	}
+
 	ppu.gpr[3] = CELL_OK;
 
 	const auto queue = idm::get<lv2_obj, lv2_event_queue>(equeue_id, [&, notify = lv2_obj::notify_all_t()](lv2_event_queue& queue) -> CellError
@@ -480,6 +509,15 @@ error_code sys_event_queue_receive(ppu_thread& ppu, u32 equeue_id, vm::ptr<sys_e
 		lv2_obj::prepare_for_sleep(ppu);
 
 		std::lock_guard lock(queue.mutex);
+
+		if (gd_intro_wait)
+		{
+			gamedeck_trace::emit("intro_event_wait_queue",
+				"queue=0x%08x\tkey=0x%016llx\tname=0x%016llx\tprotocol=%u\ttype=%u\tcapacity=%u\tdepth=%llu\tpq=0x%08x\tsq=0x%08x",
+				queue.id, static_cast<unsigned long long>(queue.key), static_cast<unsigned long long>(queue.name),
+				static_cast<unsigned>(queue.protocol), static_cast<unsigned>(queue.type), static_cast<unsigned>(queue.size),
+				static_cast<unsigned long long>(queue.events.size()), queue.pq ? queue.pq->id : 0u, queue.sq ? queue.sq->id : 0u);
+		}
 
 		// "/dev_flash/vsh/module/msmw2.sprx" seems to rely on some cryptic shared memory behaviour that we don't emulate correctly
 		// This is a hack to avoid waiting for 1m40s every time we boot vsh
@@ -586,6 +624,14 @@ error_code sys_event_queue_receive(ppu_thread& ppu, u32 equeue_id, vm::ptr<sys_e
 		{
 			ppu.state.wait(state);
 		}
+	}
+
+	if (gd_intro_wait)
+	{
+		gamedeck_trace::emit("intro_event_wait_exit",
+			"ppu=0x%08x\tqueue=0x%08x\tret=0x%016llx\td0=0x%016llx\td1=0x%016llx\td2=0x%016llx\td3=0x%016llx",
+			ppu.id, equeue_id, static_cast<unsigned long long>(ppu.gpr[3]), static_cast<unsigned long long>(ppu.gpr[4]),
+			static_cast<unsigned long long>(ppu.gpr[5]), static_cast<unsigned long long>(ppu.gpr[6]), static_cast<unsigned long long>(ppu.gpr[7]));
 	}
 
 	return not_an_error(ppu.gpr[3]);

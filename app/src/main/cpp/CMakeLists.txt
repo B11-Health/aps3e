@@ -83,6 +83,7 @@ target_sources(emu
         rpcs3/rpcs3/Input/pad_thread.cpp
         rpcs3/rpcs3/rpcs3_version.cpp
         rpcs3/rpcs3/stdafx.cpp
+        gamedeck_spu_llvm_provenance.cpp
         aps3e_rp3_impl.cpp
         aps3e_emu.cpp
         aps3e.cpp

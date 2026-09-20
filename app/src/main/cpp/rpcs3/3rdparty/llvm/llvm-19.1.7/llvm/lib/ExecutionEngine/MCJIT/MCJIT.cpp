@@ -87,7 +87,9 @@ MCJIT::MCJIT(std::unique_ptr<Module> M, std::unique_ptr<TargetMachine> TM,
     First->setDataLayout(getDataLayout());
 
   OwnedModules.addModule(std::move(First));
+#if !defined(__ANDROID__)
   RegisterJITEventListener(JITEventListener::createGDBRegistrationListener());
+#endif
 }
 
 MCJIT::~MCJIT() {
@@ -123,7 +125,14 @@ void MCJIT::addObjectFile(std::unique_ptr<object::ObjectFile> Obj) {
 
   notifyObjectLoaded(*Obj, *L);
 
+#if !defined(__ANDROID__)
+  // Desktop JIT listeners may need the original ObjectFile again when MCJIT
+  // emits notifyFreeingObject() from the destructor. Android registers no JIT
+  // listener, and RuntimeDyld has already copied sections, symbols and
+  // relocations into its own storage, so retaining the object only pins the
+  // backing cache buffer for the lifetime of the emulator.
   LoadedObjects.push_back(std::move(Obj));
+#endif
 }
 
 void MCJIT::addObjectFile(object::OwningBinary<object::ObjectFile> Obj) {
@@ -131,7 +140,12 @@ void MCJIT::addObjectFile(object::OwningBinary<object::ObjectFile> Obj) {
   std::unique_ptr<MemoryBuffer> MemBuf;
   std::tie(ObjFile, MemBuf) = Obj.takeBinary();
   addObjectFile(std::move(ObjFile));
+#if !defined(__ANDROID__)
+  // On Android addObjectFile() has already handed all executable/data sections
+  // and owned symbol/relocation state to RuntimeDyld, and there are no JIT event
+  // listeners that need the source ELF bytes later. Do not pin the cache buffer.
   Buffers.push_back(std::move(MemBuf));
+#endif
 }
 
 void MCJIT::addArchive(object::OwningBinary<object::Archive> A) {
@@ -229,8 +243,14 @@ void MCJIT::generateCodeForModule(Module *M) {
 
   notifyObjectLoaded(*LoadedObject.get(), *L);
 
+#if !defined(__ANDROID__)
+  // See addObjectFile above. On Android the parsed ObjectFile and its source
+  // buffer have no remaining consumer once RuntimeDyld::loadObject() and
+  // notifyObjectLoaded() return. Release them here instead of retaining every
+  // cached PPU object until process exit.
   Buffers.push_back(std::move(ObjectToLoad));
   LoadedObjects.push_back(std::move(*LoadedObject));
+#endif
 
   OwnedModules.markModuleAsLoaded(M);
 }

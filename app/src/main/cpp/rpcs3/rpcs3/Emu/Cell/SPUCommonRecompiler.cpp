@@ -937,6 +937,32 @@ void spu_cache::initialize(bool build_existing_cache)
 		}
 	}
 
+#if defined(__ANDROID__) && defined(ARCH_ARM64)
+	if (build_existing_cache && g_cfg.core.spu_decoder == spu_decoder_type::llvm &&
+		g_cfg.core.spu_cache && !func_list.empty() && !g_cfg.core.llvm_precompilation &&
+		!is_debug && !g_cfg.core.spu_debug && g_cfg.core.spu_llvm_lower_bound == 0 &&
+		g_cfg.core.spu_llvm_upper_bound == u64{umax})
+	{
+		// Disk membership alone owns no compilation. Live demand analysis claims
+		// each entry through spu_compile_guard, including relocated first use.
+		auto& runtime = g_fxo->get<spu_runtime>();
+		for (auto& func : func_list)
+		{
+			if (Emu.IsStopped())
+			{
+				return;
+			}
+			runtime.add_empty(std::move(func))->cached = 1;
+		}
+
+		// Keep the appendable file alive without restarting function collection.
+		cache.collect_funcs_to_precompile = false;
+		g_fxo->get<spu_cache>() = std::move(cache);
+		gamedeck_trace::emit("spu_cache_lazy_ready", "functions=%llu", static_cast<unsigned long long>(func_list.size()));
+		return;
+	}
+#endif
+
 	u32 worker_count = 0;
 
 	std::optional<scoped_progress_dialog> progress_dialog;
@@ -1437,8 +1463,61 @@ spu_item* spu_runtime::add_empty(spu_program&& data)
 	return prev;
 }
 
+#ifdef ARCH_ARM64
+spu_compile_guard::spu_compile_guard(spu_item& item)
+	: m_item(item)
+	, m_error_cleanup(on_error, this)
+{
+	while (!Emu.IsStopped() && (!thread_ctrl::get_current() || thread_ctrl::state() != thread_state::aborting))
+	{
+		if (m_item.compiled.load())
+		{
+			return;
+		}
+
+		if (m_item.compiling.compare_and_swap_test(0, 1))
+		{
+			m_owned = true;
+			// A previous owner may have published between the load and claim.
+			if (m_item.compiled.load())
+			{
+				m_item.compiling = 0;
+				m_item.compiling.notify_all();
+				m_owned = false;
+			}
+			return;
+		}
+
+		// Timed wait also observes cancellation when an owner is still in LLVM.
+		m_item.compiling.wait(1, atomic_wait_timeout{1'000'000});
+	}
+}
+
+void spu_compile_guard::release() noexcept
+{
+	if (m_owned)
+	{
+		m_item.compiling = 0;
+		m_item.compiling.notify_all();
+		m_owned = false;
+	}
+}
+
+spu_compile_guard::~spu_compile_guard()
+{
+	release();
+}
+#endif
+
 spu_function_t spu_runtime::rebuild_ubertrampoline(u32 id_inst)
 {
+#ifdef ARCH_ARM64
+	std::unique_lock lock(m_trampoline_mutex);
+	thread_ctrl::scoped_error_callback unlock_on_error([](void* arg)
+	{
+		static_cast<std::unique_lock<std::mutex>*>(arg)->unlock();
+	}, &lock);
+#endif
 	// Prepare sorted list
 	static thread_local std::vector<std::pair<std::span<const u32>, spu_function_t>> m_flat_list;
 
@@ -1446,10 +1525,12 @@ spu_function_t spu_runtime::rebuild_ubertrampoline(u32 id_inst)
 	auto stuff_it = ::at32(m_stuff, id_inst >> 12).begin();
 	auto stuff_end = ::at32(m_stuff, id_inst >> 12).end();
 	{
+#ifndef ARCH_ARM64
 		if (stuff_it->trampoline)
 		{
 			return stuff_it->trampoline;
 		}
+#endif
 
 		m_flat_list.clear();
 
@@ -1461,12 +1542,19 @@ spu_function_t spu_runtime::rebuild_ubertrampoline(u32 id_inst)
 				range = range.subspan((it->data.entry_point - it->data.lower_bound) / 4);
 				m_flat_list.emplace_back(range, ptr);
 			}
+#ifndef ARCH_ARM64
 			else
 			{
 				// Pull oneself deeper (TODO)
 				++stuff_it;
 			}
+#endif
 		}
+	}
+
+	if (m_flat_list.empty())
+	{
+		return tr_dispatch;
 	}
 
 	std::sort(m_flat_list.begin(), m_flat_list.end(), FN(s_span_less<const u32>(x.first, y.first)));
@@ -1985,6 +2073,11 @@ spu_function_t spu_runtime::rebuild_ubertrampoline(u32 id_inst)
 		jit_announce(wxptr, raw - wxptr, fname);
 	}
 
+#ifdef ARCH_ARM64
+	// Insertion order says nothing about completion order for lazy entries.
+	// The lock prevents an older snapshot from overwriting a newer rebuild.
+	::at32(*spu_runtime::g_dispatcher, id_inst >> 12) = result;
+#else
 	if (auto _old = stuff_it->trampoline.compare_and_swap(nullptr, result))
 	{
 		return _old;
@@ -2018,6 +2111,7 @@ spu_function_t spu_runtime::rebuild_ubertrampoline(u32 id_inst)
 		}
 	}
 	while (!insert_to.compare_exchange(_old, result));
+#endif
 
 	return result;
 }

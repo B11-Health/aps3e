@@ -12,6 +12,7 @@
 
 #include <cmath>
 
+
 LOG_CHANNEL(cellAudio);
 
 extern atomic_t<recording_mode> g_recording_mode;
@@ -314,6 +315,27 @@ void audio_ringbuffer::commit_data(f32* buf, u32 sample_cnt)
 	}
 
 	cb_ringbuf.push(buf, sample_cnt_out * cfg.audio_sample_size);
+#if defined(__ANDROID__)
+	if (gamedeck_trace::enabled())
+	{
+		static thread_local u64 gd_last_publish_ns = 0;
+		static thread_local u64 gd_publish_count = 0;
+		const u64 gd_now_ns = gamedeck_trace::now_ns();
+		const u64 gd_gap_us = gd_last_publish_ns ? (gd_now_ns - gd_last_publish_ns) / 1000 : 0;
+		gd_last_publish_ns = gd_now_ns;
+		const u64 gd_n = ++gd_publish_count;
+		if (gd_gap_us >= 12000)
+		{
+			gamedeck_trace::emit("audio_publish_gap", "count=%llu\tgap_us=%llu\tsamples=%u\tqueued_bytes=%llu", static_cast<unsigned long long>(gd_n), static_cast<unsigned long long>(gd_gap_us), sample_cnt, static_cast<unsigned long long>(cb_ringbuf.get_used_size()));
+		}
+		if (gd_n <= 4 || (gd_n % 128) == 0)
+		{
+			gamedeck_trace::emit("audio_ring_level",
+				"count=%llu\tused_bytes=%llu\tfree_bytes=%llu\tsamples=%u\tchannels=%u\tbackend_channels=%u\tsample_size=%u",
+				static_cast<unsigned long long>(gd_n), static_cast<unsigned long long>(cb_ringbuf.get_used_size()), static_cast<unsigned long long>(cb_ringbuf.get_free_size()), sample_cnt, cfg.audio_channels, cfg.backend_ch_cnt, cfg.audio_sample_size);
+		}
+	}
+#endif
 }
 
 void audio_ringbuffer::play()
@@ -382,6 +404,9 @@ void audio_port::tag(s32 offset)
 	{
 		port_buf[tag_pos] = tag;
 		last_tag_value[tag_nr] = -0.0f;
+
+		// Mark front right too; see PORT_BUFFER_MARK_CHANNEL.
+		port_buf[mark_position(tag_nr)] = tag;
 	}
 
 	prev_touched_tag_nr = -1;
@@ -442,8 +467,10 @@ std::tuple<u32, u32, u32, u32> cell_audio_thread::count_port_buffer_tags()
 	u32 untouched = 0;
 	u32 incomplete = 0;
 
-	for (audio_port& port : ports)
+	for (u32 port_index = 0; port_index < ports.size(); port_index++)
 	{
+		audio_port& port = ports[port_index];
+
 		if (port.state != audio_port_state::started) continue;
 		active++;
 
@@ -455,6 +482,7 @@ std::tuple<u32, u32, u32, u32> cell_audio_thread::count_port_buffer_tags()
 
 		u32 last_touched_tag_nr = port.prev_touched_tag_nr;
 		bool retouched = false;
+		bool tag_moved = false;
 		for (u32 tag_pos = tag_first_pos, tag_nr = 0; tag_nr < PORT_BUFFER_TAG_COUNT; tag_pos += tag_delta, tag_nr++)
 		{
 			const f32 val = port_buf[tag_pos];
@@ -466,14 +494,54 @@ std::tuple<u32, u32, u32, u32> cell_audio_thread::count_port_buffer_tags()
 
 				retouched |= (tag_nr <= port.prev_touched_tag_nr) && port.prev_touched_tag_nr != umax;
 				last_touched_tag_nr = tag_nr;
+				tag_moved = true;
 			}
+		}
+
+		if (tag_moved)
+		{
+			m_periods_without_tag[port_index] = 0;
 		}
 
 		// Decide whether the buffer is untouched, in progress, incomplete, or complete
 		if (last_touched_tag_nr == umax)
 		{
-			// no tag has been touched yet
-			untouched++;
+			bool front_only = false;
+
+			if (m_periods_without_tag[port_index] > PORT_FRONT_ONLY_SETTLE_PERIODS)
+			{
+				for (u32 tag_nr = 0; tag_nr < PORT_BUFFER_TAG_COUNT; tag_nr++)
+				{
+					const f32 val = port_buf[port.mark_position(tag_nr)];
+
+					if (val != -0.0f || !std::signbit(val))
+					{
+						front_only = true;
+						break;
+					}
+				}
+			}
+
+			if (!front_only)
+			{
+				untouched++;
+			}
+			else
+			{
+				incomplete++;
+
+				if (!m_front_only_reported[port_index])
+				{
+					m_front_only_reported[port_index] = true;
+					cellAudio.notice("Port %u carries front channel audio only (num_channels=%u). Its surround tags cannot move, so front-channel marks decide whether it is silent.", port.number, port.num_channels);
+#if defined(__ANDROID__)
+					if (gamedeck_trace::enabled())
+					{
+						gamedeck_trace::emit("audio_front_only_port", "port=%u\tchannels=%u", port.number, port.num_channels);
+					}
+#endif
+				}
+			}
 		}
 		else if (last_touched_tag_nr == PORT_BUFFER_TAG_COUNT - 1)
 		{
@@ -513,8 +581,10 @@ std::tuple<u32, u32, u32, u32> cell_audio_thread::count_port_buffer_tags()
 void cell_audio_thread::reset_ports(s32 offset)
 {
 	// Memset buffer to 0 and tag
-	for (audio_port& port : ports)
+	for (u32 port_index = 0; port_index < ports.size(); port_index++)
 	{
+		audio_port& port = ports[port_index];
+
 		if (port.state != audio_port_state::started) continue;
 
 		memset(port.get_vm_ptr(offset), 0, port.block_size() * sizeof(float));
@@ -522,6 +592,11 @@ void cell_audio_thread::reset_ports(s32 offset)
 		if (cfg.buffering_enabled)
 		{
 			port.tag(offset);
+
+			if (m_periods_without_tag[port_index] < 0xFF)
+			{
+				m_periods_without_tag[port_index]++;
+			}
 		}
 	}
 }
@@ -705,12 +780,37 @@ void cell_audio_thread::operator()()
 
 	thread_ctrl::scoped_priority high_prio(+1);
 
+
+#ifdef __ANDROID__
+	// Android starts the native Cubeb/AAudio stream during backend Open(). Do not
+	// keep CellAudio behind the broader IsPausedOrReady() gate merely because the
+	// emulator is still in system_state::starting; wait only for real pause/ready.
+	while (Emu.IsPaused() || Emu.IsReady())
+#else
 	while (Emu.IsPausedOrReady())
+#endif
 	{
 		thread_ctrl::wait_for(5000);
 	}
 
 	u32 untouched_expected = 0;
+
+	// FMV/audio-decoder ports can oscillate between touched and untouched while spinning up.
+	// Hold the learned quiet-port expectation briefly so CellAudio does not repeatedly stall.
+	u64 untouched_hold_until = 0;
+	const u64 untouched_hold_periods = 340'000 / std::max<u32>(1, cfg.audio_block_period);
+	const auto expect_untouched = [&](u32 count)
+	{
+		if (count >= untouched_expected)
+		{
+			untouched_expected = count;
+			untouched_hold_until = m_counter + untouched_hold_periods;
+		}
+		else if (m_counter >= untouched_hold_until)
+		{
+			untouched_expected = count;
+		}
+	};
 
 	u32 loop_count = 0;
 
@@ -905,40 +1005,64 @@ void cell_audio_thread::operator()()
 
 			// Wait until buffers have been touched
 			//cellAudio.error("active=%u, in_progress=%u, untouched=%u, incomplete=%u", active_ports, in_progress, untouched, incomplete);
+			bool waited_long_enough = false;
+
 			if (untouched > untouched_expected)
 			{
-				// Games may sometimes "skip" audio periods entirely if they're falling behind (a sort of "frameskip" for audio)
-				// As such, if the game doesn't touch buffers for too long we advance time hoping the game recovers
+				// Games may sometimes "skip" audio periods entirely if they're falling behind.
+				// After the timeout, stop waiting for quiet ports. If some ports do contain audio,
+				// mix them instead of advancing the clock and discarding a whole output block.
 				if (
 					(untouched == active_ports && time_since_last_period > cfg.fully_untouched_timeout) ||
 					(time_since_last_period > cfg.partially_untouched_timeout) || g_cfg.audio.disable_sampling_skip
 				   )
 				{
-					// There's no audio in the buffers, simply advance time and hope the game recovers
-					cellAudio.trace("advancing time: untouched=%u/%u (expected=%u), enqueued_buffers=%llu", untouched, active_ports, untouched_expected, enqueued_buffers);
-					untouched_expected = untouched;
-					advance(timestamp);
+					expect_untouched(untouched);
+
+					if (untouched >= active_ports)
+					{
+						// There is no audio in any active buffer; advancing is safe.
+						cellAudio.trace("advancing time: untouched=%u/%u (expected=%u), enqueued_buffers=%llu", untouched, active_ports, untouched_expected, enqueued_buffers);
+#if defined(__ANDROID__)
+						if (gamedeck_trace::enabled())
+						{
+							static thread_local u64 gd_guest_skip_count = 0;
+							const u64 gd_skip_n = ++gd_guest_skip_count;
+							if (gd_skip_n <= 8 || (gd_skip_n % 64) == 0 || time_since_last_period >= 40000)
+							{
+								gamedeck_trace::emit("audio_guest_skip", "skip_count=%llu\tcounter=%llu\tsince_us=%llu\tactive=%u\tuntouched=%u\texpected=%u\tin_progress=%u\tincomplete=%u\tenqueued_buffers=%llu",
+									static_cast<unsigned long long>(gd_skip_n), static_cast<unsigned long long>(m_counter), static_cast<unsigned long long>(time_since_last_period), active_ports, untouched, untouched_expected, in_progress, incomplete, static_cast<unsigned long long>(enqueued_buffers));
+							}
+						}
+#endif
+						advance(timestamp);
+						continue;
+					}
+
+					// Untouched ports were memset to silence; preserve and mix the ports that were filled.
+					cellAudio.trace("mixing partially untouched buffers: untouched=%u/%u, enqueued_buffers=%llu", untouched, active_ports, enqueued_buffers);
+					waited_long_enough = true;
+				}
+				else
+				{
+					cellAudio.trace("waiting: untouched=%u/%u (expected=%u), enqueued_buffers=%llu", untouched, active_ports, untouched_expected, enqueued_buffers);
+					thread_ctrl::wait_for(1000);
 					continue;
 				}
-
-				cellAudio.trace("waiting: untouched=%u/%u (expected=%u), enqueued_buffers=%llu", untouched, active_ports, untouched_expected, enqueued_buffers);
-				thread_ctrl::wait_for(1000);
-				continue;
 			}
 
-			// Fast-path for when there is no audio in the buffers
+			// Fast-path for when there is no audio in the buffers.
 			if (untouched == active_ports)
 			{
-				// There's no audio in the buffers, simply advance time
 				cellAudio.trace("enqueuing silence: untouched=%u/%u (expected=%u), enqueued_buffers=%llu", untouched, active_ports, untouched_expected, enqueued_buffers);
 				ringbuffer->enqueue_silence();
-				untouched_expected = untouched;
+				expect_untouched(untouched);
 				advance(timestamp);
 				continue;
 			}
 
-			// Wait for buffer(s) to be completely filled
-			if (in_progress > 0)
+			// Wait for buffer(s) to be completely filled unless the timeout already said to mix.
+			if (!waited_long_enough && in_progress > 0)
 			{
 				cellAudio.trace("waiting: in_progress=%u/%u, enqueued_buffers=%u", in_progress, active_ports, enqueued_buffers);
 				thread_ctrl::wait_for(500);
@@ -947,8 +1071,8 @@ void cell_audio_thread::operator()()
 
 			//cellAudio.error("active=%u, untouched=%u, in_progress=%d, incomplete=%d, enqueued_buffers=%u", active_ports, untouched, in_progress, incomplete, enqueued_buffers);
 
-			// Store number of untouched buffers for future reference
-			untouched_expected = untouched;
+			// Store number of untouched buffers for future reference with hysteresis.
+			expect_untouched(untouched);
 
 			// Log if we enqueued untouched/incomplete buffers
 			if (untouched > 0 || incomplete > 0)
@@ -958,6 +1082,10 @@ void cell_audio_thread::operator()()
 		}
 
 		// Mix
+#if defined(__ANDROID__)
+		const bool gd_trace_mix = gamedeck_trace::enabled();
+		const u64 gd_mix_begin_ns = gd_trace_mix ? gamedeck_trace::now_ns() : 0;
+#endif
 		float* buf = ringbuffer->get_current_buffer();
 
 		switch (cfg.audio_channels)
@@ -1013,6 +1141,16 @@ void cell_audio_thread::operator()()
 
 		// Enqueue
 		ringbuffer->enqueue();
+#if defined(__ANDROID__)
+		if (gd_trace_mix)
+		{
+			const u64 gd_mix_us = (gamedeck_trace::now_ns() - gd_mix_begin_ns) / 1000;
+			if (gd_mix_us >= 4000)
+			{
+				gamedeck_trace::emit("audio_mix_slow", "elapsed_us=%llu\tcounter=%llu", static_cast<unsigned long long>(gd_mix_us), static_cast<unsigned long long>(m_counter));
+			}
+		}
+#endif
 
 		// Advance time
 		advance(timestamp);
@@ -1035,6 +1173,8 @@ audio_port* cell_audio_thread::open_port()
 	{
 		if (ports[i].state.compare_and_swap_test(audio_port_state::closed, audio_port_state::opened))
 		{
+			m_front_only_reported[i] = false;
+			m_periods_without_tag[i] = 0;
 			return &ports[i];
 		}
 	}

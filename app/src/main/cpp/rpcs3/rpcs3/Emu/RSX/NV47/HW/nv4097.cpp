@@ -691,6 +691,10 @@ namespace rsx
 
 			ensure(addr != umax);
 
+			// Notify ticks are strongly ordered. Guest code can poll this record as a
+			// completion fence, so all queued backend work must be visible first.
+			RSX(ctx)->sync();
+
 			vm::_ptr<atomic_t<RsxNotify>>(addr)->store(
 			{
 				RSX(ctx)->timestamp(),

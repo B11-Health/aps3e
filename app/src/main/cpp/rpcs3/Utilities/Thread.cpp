@@ -1570,8 +1570,15 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 	// Hack: allocate memory in case the emulator is stopping
 	const auto hack_alloc = [&]()
 	{
+		const bool added_flag = cpu && !cpu->state.test_and_set(cpu_flag::wait);
+
 		if (vm::check_addr(addr, required_page_perms))
 		{
+			if (added_flag)
+			{
+				cpu->check_state();
+			}
+
 			return true;
 		}
 
@@ -1579,6 +1586,11 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 
 		if (!area)
 		{
+			if (added_flag)
+			{
+				cpu->check_state();
+			}
+
 			return false;
 		}
 
@@ -1600,6 +1612,11 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 				ppu_register_range(addr & -0x10000, 0x10000);
 			}
 
+			if (added_flag)
+			{
+				cpu->check_state();
+			}
+
 			g_tls_access_violation_recovered = addr;
 			return true;
 		}
@@ -1613,8 +1630,18 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 				ppu_register_range(addr & -0x10000, 0x10000);
 			}
 
+			if (added_flag)
+			{
+				cpu->check_state();
+			}
+
 			g_tls_access_violation_recovered = addr;
 			return true;
+		}
+
+		if (added_flag)
+		{
+			cpu->check_state();
 		}
 
 		return false;
@@ -2375,7 +2402,7 @@ void thread_base::initialize(void (*error_cb)())
 		busy_wait();
 	}
 	[[maybe_unused]] u64 new_tid = 0;
-#elif defined(ANDROID)
+#elif defined(__ANDROID__)
 	const u64 new_tid = pthread_self();
 #else
 	const u64 new_tid = reinterpret_cast<u64>(pthread_self());
@@ -2829,7 +2856,7 @@ thread_base::~thread_base() noexcept
 		const HANDLE handle0 = reinterpret_cast<HANDLE>(m_thread.load());
 		WaitForSingleObject(handle0, INFINITE);
 		CloseHandle(handle0);
-#elif defined(ANDROID)
+#elif defined(__ANDROID__)
 		pthread_join(m_thread.load(), nullptr);
 #else
 		pthread_join(reinterpret_cast<pthread_t>(m_thread.load()), nullptr);
@@ -2905,7 +2932,7 @@ u64 thread_base::get_cycles()
 #else
 	clockid_t _clock;
 	struct timespec thread_time;
-#ifdef ANDROID
+#ifdef __ANDROID__
 	pthread_t thread_id = handle;
 #else
 	pthread_t thread_id = reinterpret_cast<pthread_t>(handle);
@@ -3615,7 +3642,7 @@ u64 thread_ctrl::get_tid()
 	{
 	#ifdef _WIN32
 		return GetCurrentThreadId();
-	#elif defined(ANDROID)
+	#elif defined(__ANDROID__)
 		return pthread_gettid_np(pthread_self());
 	#elif defined(__linux__)
 		return syscall(SYS_gettid);
