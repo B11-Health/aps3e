@@ -15,7 +15,7 @@ trap 'rc=$?; echo "$rc" > "$OUT/exit-code.txt"; exit $rc' EXIT
 
 echo '== source identity =='
 git rev-parse HEAD | tee "$OUT/synthetic-commit.txt"
-git status --porcelain=v1 | tee "$OUT/git-status.txt"
+git status --porcelain=v1 --untracked-files=no | tee "$OUT/git-status.txt"
 test ! -s "$OUT/git-status.txt"
 sha256sum -c ci/gta-spu-ownership/current-source.sha256 | tee "$OUT/source-manifest-check.txt"
 cp ci/gta-spu-ownership/current-source.sha256 "$OUT/current-source.sha256"
