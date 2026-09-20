@@ -3,7 +3,7 @@ name: GTA SPU ownership provenance core
 on:
   push:
     branches:
-      - 'ci/gta-spu-ownership-20260920T015358Z'
+      - 'ci/gta-spu-ownership-fast2-20260920T0258Z'
 
 permissions:
   contents: read

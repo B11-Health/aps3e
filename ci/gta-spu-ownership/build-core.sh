@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="${GITHUB_WORKSPACE:?}"
 OUT="$ROOT/out/gta-spu-core"
 WORK="${RUNNER_TEMP:?}/gta-spu-core"
-JOBS=1
+JOBS=2
 NDK_VER=29.0.14206865
 API=24
 ICONV_VER=1.19
@@ -54,7 +54,7 @@ ICONV_PREFIX="$WORK/iconv-prefix"
  cd "$ICONV_SRC"
  CC="$CC" CXX="$CXX" AR="$TOOL/bin/llvm-ar" RANLIB="$TOOL/bin/llvm-ranlib" STRIP="$TOOL/bin/llvm-strip" \
  CFLAGS='-O2 -fPIC' CXXFLAGS='-O2 -fPIC' ./configure --host="$TARGET" --prefix="$ICONV_PREFIX" --enable-static --disable-shared --disable-nls
- make -j1
+ make -j2
  make install
 )
 test -s "$ICONV_PREFIX/include/iconv.h"
@@ -70,7 +70,7 @@ cmake -S "$LLVM_SRC" -B "$HOST_LLVM" -G Ninja \
  -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF \
  -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF \
  -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_BACKTRACES=OFF
-cmake --build "$HOST_LLVM" --target llvm-tblgen --parallel 1
+cmake --build "$HOST_LLVM" --target llvm-tblgen --parallel 2
 TBLGEN="$HOST_LLVM/bin/llvm-tblgen"
 test -x "$TBLGEN"
 "$TBLGEN" --version | tee "$OUT/llvm-tblgen-version.txt"
@@ -94,7 +94,7 @@ cmake -S "$ROOT/app/src/main/cpp" -B "$BUILD" -G Ninja \
  | tee "$OUT/configure.log"
 
 echo '== build libe.so single-job =='
-cmake --build "$BUILD" --target libe.so --parallel 1 | tee "$OUT/compile-link.log"
+cmake --build "$BUILD" --target libe.so --parallel 2 | tee "$OUT/compile-link.log"
 mapfile -t cores < <(find "$BUILD" -type f -name libe.so -print)
 test "${#cores[@]}" -eq 1
 CORE="${cores[0]}"
