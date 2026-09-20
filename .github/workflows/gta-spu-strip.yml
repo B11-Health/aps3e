@@ -1,0 +1,112 @@
+name: GTA SPU strip proven core
+
+on:
+  push:
+    branches:
+      - 'ci/gta-spu-strip-20260920T0008Z'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  strip:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout proven source
+        uses: actions/checkout@v4
+
+      - name: Install exact NDK r29
+        shell: bash
+        run: |
+          : "${ANDROID_HOME:=/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -perm -111 | sort -V | tail -1)"; fi
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install 'ndk;29.0.14206865'
+          grep -Eq '^Pkg.Revision[[:space:]]*=[[:space:]]*29\.0\.14206865[[:space:]]*$' "$ANDROID_HOME/ndk/29.0.14206865/source.properties"
+
+      - name: Download proven unstripped artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api repos/${{ github.repository }}/actions/artifacts/10598341727/zip > source.zip
+          mkdir source-artifact
+          unzip -q source.zip -d source-artifact
+          printf '%s  %s\n' '42c0beef3524d10c5e1b46efd28a39279144dc9f0837d63ba6b502d4fce49bcc' 'source-artifact/libe.so' | sha256sum -c -
+          grep -Fq '"binary_verified": true' source-artifact/spu-provenance-binary.json
+          grep -Fq '"artifact_verified": true' source-artifact/spu-provenance-binary.json
+
+      - name: Strip and reverify core
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/out/gta-spu-stripped"
+          mkdir -p "$OUT"
+          cp source-artifact/libe.so "$OUT/libe.so"
+          cp source-artifact/spu-provenance-binary.json "$OUT/unstripped-provenance.json"
+          cp source-artifact/libe.sha256 "$OUT/unstripped-libe.sha256"
+          cp source-artifact/libe.build-id "$OUT/unstripped-libe.build-id"
+
+          NDK="$ANDROID_HOME/ndk/29.0.14206865"
+          TOOL="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          STRIP="$TOOL/bin/llvm-strip"
+          test -x "$STRIP"
+          SOURCE=app/src/main/cpp/rpcs3/rpcs3/Emu/Cell/SPULLVMRecompiler.cpp
+
+          BEFORE="$(stat -c %s "$OUT/libe.so")"
+          printf 'before_bytes=%s\n' "$BEFORE" | tee "$OUT/size.txt"
+          file "$OUT/libe.so" | tee "$OUT/file-before.txt"
+
+          "$STRIP" --strip-unneeded "$OUT/libe.so"
+
+          AFTER="$(stat -c %s "$OUT/libe.so")"
+          printf 'after_bytes=%s\n' "$AFTER" | tee -a "$OUT/size.txt"
+          python3 - "$BEFORE" "$AFTER" <<'PY'
+import sys
+before, after = map(int, sys.argv[1:])
+if not after < before:
+    raise SystemExit("strip did not reduce size")
+print(f"reduction_bytes={before-after}")
+print(f"reduction_percent={(before-after)*100.0/before:.2f}")
+PY
+
+          file "$OUT/libe.so" | tee "$OUT/file-after.txt"
+          ! grep -Fq 'with debug_info' "$OUT/file-after.txt"
+
+          readelf -h "$OUT/libe.so" > "$OUT/libe-elf-header.txt"
+          readelf -d "$OUT/libe.so" > "$OUT/libe-elf-dynamic.txt"
+          readelf -n "$OUT/libe.so" > "$OUT/libe-notes.txt"
+          grep -Fq 'Machine:                           AArch64' "$OUT/libe-elf-header.txt"
+          grep -Eq 'Type:.*DYN' "$OUT/libe-elf-header.txt"
+          ! grep -Eq '\(RPATH\)|\(RUNPATH\)' "$OUT/libe-elf-dynamic.txt"
+
+          sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' "$OUT/libe-elf-dynamic.txt" | sort -u | tee "$OUT/DT-NEEDED.txt"
+          allowed='libOpenSLES.so libandroid.so libc++_shared.so libc.so libdl.so liblog.so libm.so libvulkan.so libz.so libhook_impl.so'
+          while read -r dep; do case " $allowed " in *" $dep "*) ;; *) echo "UNEXPECTED_DT_NEEDED=$dep"; exit 70;; esac; done < "$OUT/DT-NEEDED.txt"
+
+          python3 ci/gta-spu-ownership/spu-llvm-provenance.py --source "$SOURCE" --verify-binary "$OUT/libe.so" --json | tee "$OUT/spu-provenance-stripped.json"
+          grep -Fq '"binary_verified": true' "$OUT/spu-provenance-stripped.json"
+          grep -Fq '"artifact_verified": true' "$OUT/spu-provenance-stripped.json"
+          strings "$OUT/libe.so" | grep -F 'GAMEDECK_SPU_LLVM_PROVENANCE_V1|' | head -1 | tee "$OUT/embedded-provenance-marker.txt"
+          test -s "$OUT/embedded-provenance-marker.txt"
+
+          sha256sum "$OUT/libe.so" | tee "$OUT/libe.sha256"
+          sed -n 's/.*Build ID: //p' "$OUT/libe-notes.txt" | head -1 | tee "$OUT/libe.build-id"
+          test -s "$OUT/libe.build-id"
+          cp "$NDK/source.properties" "$OUT/ndk-source.properties"
+          "$STRIP" --version | head -5 > "$OUT/llvm-strip-version.txt"
+          find "$OUT" -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS"
+
+      - name: Upload stripped verified core
+        uses: actions/upload-artifact@v4
+        with:
+          name: gta-spu-ownership-stripped-${{ github.run_id }}
+          path: out/gta-spu-stripped/
+          if-no-files-found: error
+          retention-days: 7
