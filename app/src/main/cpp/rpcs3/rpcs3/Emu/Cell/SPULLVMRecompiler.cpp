@@ -4168,10 +4168,12 @@ public:
 							}
 							else if (!(itype & spu_itype::branch))
 							{
-								// Hack: inline ret instruction before final jmp; this is not reliable.
+								// The legacy inline-ret shortcut is unsafe on ARM64: it can escape
+								// before the GHC frame-preservation pass restores the hypervisor LR.
+								// Let ARM64 reach the explicit GHC tail call to spu_ret instead.
 #ifdef ARCH_X64
 								m_ir->CreateCall(InlineAsm::get(get_ftype<void>(), "ret", "", true, false, InlineAsm::AD_Intel));
-#else
+#elif !defined(ARCH_ARM64)
 								m_ir->CreateCall(InlineAsm::get(get_ftype<void>(), "ret", "", true, false));
 #endif
 								fret = ret_func;
