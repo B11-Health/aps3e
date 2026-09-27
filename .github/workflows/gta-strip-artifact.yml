@@ -1,0 +1,68 @@
+name: GTA strip completed core artifact
+
+on:
+  push:
+    branches:
+      - 'ci/gta-gcm-oldapi-put-20260927-v1'
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: gta-strip-completed-core-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  strip:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout metadata commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download exact completed core artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          mkdir -p in out
+          gh run download 36340805473 \
+            --repo "${{ github.repository }}" \
+            --name gta-spu-ownership-core-36340805473 \
+            --dir in
+          test -s in/libe.so
+          sha256sum in/libe.so | tee out/libe.unstripped.sha256
+          cat in/libe.sha256 | tee out/libe.build.sha256
+          grep -F "$(sha256sum in/libe.so | awk '{print $1}')" in/libe.sha256
+
+      - name: Strip and compress core
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm zstd file binutils
+          cp in/libe.so out/libe.stripped.so
+          llvm-strip --strip-unneeded out/libe.stripped.so
+          test -s out/libe.stripped.so
+          sha256sum out/libe.stripped.so | tee out/libe.stripped.sha256
+          file out/libe.stripped.so | tee out/libe.stripped.file.txt
+          readelf -h out/libe.stripped.so > out/libe.stripped.elf-header.txt
+          readelf -d out/libe.stripped.so > out/libe.stripped.dynamic.txt
+          strings out/libe.stripped.so | grep -F 'GAMEDECK_SPU_LLVM_PROVENANCE_V1' | head -n 1 | tee out/embedded-provenance-marker.txt
+          zstd -T0 -6 -f out/libe.stripped.so -o out/libe.stripped.so.zst
+          sha256sum out/libe.stripped.so.zst | tee out/libe.stripped.so.zst.sha256
+          stat -c '%s %n' out/libe.stripped.so out/libe.stripped.so.zst | tee out/sizes.txt
+          rm -f out/libe.stripped.so
+
+      - name: Upload compact stripped core
+        uses: actions/upload-artifact@v4
+        with:
+          name: gta-gcm-oldapi-put-stripped-core-${{ github.run_id }}
+          path: out/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
