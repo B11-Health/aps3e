@@ -579,6 +579,8 @@ error_code cellGcmSetFlipStatus2()
 	return CELL_OK;
 }
 
+static u32 getOffsetFromAddress(u32 address);
+
 template <bool old_api = false, typename ret_type = std::conditional_t<old_api, s32, error_code>>
 ret_type gcmSetPrepareFlip(ppu_thread& ppu, vm::ptr<CellGcmContextData> ctxt, u32 id)
 {
@@ -600,9 +602,19 @@ ret_type gcmSetPrepareFlip(ppu_thread& ppu, vm::ptr<CellGcmContextData> ctxt, u3
 
 	const u32 cmd_size = rsx::make_command(ctxt->current, GCM_FLIP_COMMAND, { id });
 
-	if (!old_api && ctxt.addr() == gcm_cfg.gcm_info.context_addr)
+	if (ctxt.addr() == gcm_cfg.gcm_info.context_addr)
 	{
-		vm::_ptr<CellGcmControl>(gcm_cfg.gcm_info.control_addr)->put += cmd_size;
+		auto& put = vm::_ptr<CellGcmControl>(gcm_cfg.gcm_info.control_addr)->put;
+		if constexpr (old_api)
+		{
+			// The old API writes commands through the guest context. Publish every
+			// command already written through current, not only the flip itself.
+			put.exchange(getOffsetFromAddress(ctxt->current.addr()));
+		}
+		else
+		{
+			put += cmd_size;
+		}
 	}
 
 	return static_cast<ret_type>(not_an_error(id));
