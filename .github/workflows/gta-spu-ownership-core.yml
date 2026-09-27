@@ -3,7 +3,7 @@ name: GTA SPU ownership provenance core
 on:
   push:
     branches:
-      - 'ci/gta-gcm-oldapi-put-20260927-v1'
+      - 'disabled-gta-rebuild-after-36340805473'
 permissions:
   contents: read
 
