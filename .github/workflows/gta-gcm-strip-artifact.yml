@@ -25,6 +25,10 @@ jobs:
               -o "$id.zip"
             mkdir -p "$id" && unzip -q "$id.zip" -d "$id"
           done
+      - name: Install compacting tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq llvm bsdiff zstd
       - name: Strip exact cores and build compact delta
         run: |
           set -euxo pipefail
@@ -37,8 +41,6 @@ jobs:
           llvm-strip --strip-unneeded out/candidate.so
           llvm-strip --strip-unneeded out/baseline.so
           sha256sum out/candidate.so out/baseline.so > out/stripped.sha256
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq bsdiff zstd
           bsdiff out/baseline.so out/candidate.so out/candidate-from-baseline.bsdiff
           zstd -T0 -19 -f out/candidate.so -o out/candidate.so.zst
           sha256sum out/candidate-from-baseline.bsdiff out/candidate.so.zst > out/payload.sha256
