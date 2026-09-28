@@ -1,0 +1,56 @@
+name: GTA GCM compact prior artifact
+on:
+  push:
+    branches:
+      - 'ci/gta-gcm-strip-artifact-20260927-v1'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  compact:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Fetch candidate and baseline artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          for id in 10940181411 10701106314; do
+            curl -L --fail --retry 5 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$id/zip" \
+              -o "$id.zip"
+            mkdir -p "$id" && unzip -q "$id.zip" -d "$id"
+          done
+      - name: Strip exact cores and build compact delta
+        run: |
+          set -euxo pipefail
+          CAND="$(find 10940181411 -type f -name libe.so | head -n1)"
+          BASE="$(find 10701106314 -type f -name libe.so | head -n1)"
+          test -n "$CAND"; test -n "$BASE"
+          mkdir -p out
+          cp "$CAND" out/candidate.so
+          cp "$BASE" out/baseline.so
+          llvm-strip --strip-unneeded out/candidate.so
+          llvm-strip --strip-unneeded out/baseline.so
+          sha256sum out/candidate.so out/baseline.so > out/stripped.sha256
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bsdiff zstd
+          bsdiff out/baseline.so out/candidate.so out/candidate-from-baseline.bsdiff
+          zstd -T0 -19 -f out/candidate.so -o out/candidate.so.zst
+          sha256sum out/candidate-from-baseline.bsdiff out/candidate.so.zst > out/payload.sha256
+          ls -lh out/
+      - name: Upload compact payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: gta-gcm-oldapi-put-compact-${{ github.run_id }}
+          path: |
+            out/candidate-from-baseline.bsdiff
+            out/candidate.so.zst
+            out/stripped.sha256
+            out/payload.sha256
+          compression-level: 0
+          retention-days: 7
