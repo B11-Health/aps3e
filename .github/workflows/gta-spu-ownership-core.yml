@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - 'ci/gta-gcm-oldapi-put-20260927-v1'
+      - 'ci/gta-fifo-localmem-canary-20260930'
 permissions:
   contents: read
 

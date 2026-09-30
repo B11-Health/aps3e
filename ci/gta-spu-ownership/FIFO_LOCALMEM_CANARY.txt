@@ -1,0 +1,7 @@
+GameDeck FIFO local-memory canary
+base_commit=da040275e26f570a7810d5718e903de9c40f371f
+upstream_rpcs3_commit=47538a5073ab8af9c01846cb8e5a19a77fb19e63
+upstream_parent=009ffe14173bbca3e92d012a99a3e629640a9cd6
+behavior_change=RPCS3 local-memory FIFO translation backport only
+observation_change=GameDeck trace events rsx_context_allocate and rsx_fifo_translation
+installed_baseline_untouched=true

@@ -1,6 +1,7 @@
 #include "stdafx.h"
 
 #include "Emu/System.h"
+#include "Emu/GameDeckTrace.h"
 #include "RSXFIFO.h"
 #include "RSXThread.h"
 #include "Capture/rsx_capture.h"
@@ -32,7 +33,43 @@ namespace rsx
 
 		u32 FIFO_control::translate_address(u32 address) const
 		{
-			return m_iotable->get_addr(address);
+			if (const u32 ea = m_thread->fifo_offset_to_ea(address); ea != umax) [[likely]]
+			{
+				return ea;
+			}
+
+			if (m_thread->fifo_in_local_memory || m_thread->isHLE || address >= m_thread->local_mem_size)
+			{
+				return umax;
+			}
+
+			// libgcm's system mode (seen in GTA IV 1.00, system_mode=0x210) builds its first command buffer in RSX local
+			// memory and kicks the FIFO before mapping any main memory for IO. Normal mode maps IO before the FIFO is set up.
+			// With no IO mapping at all, the offsets can only refer to local memory; the context keeps using it from then on.
+			const u32 io_pages = m_thread->main_mem_size ? std::min<u32>(m_thread->main_mem_size >> 20, ::size32(m_iotable->ea)) : ::size32(m_iotable->ea);
+
+			for (u32 i = 0; i < io_pages; i++)
+			{
+				if (m_iotable->ea[i] != umax)
+				{
+					return umax;
+				}
+			}
+
+			if (!m_thread->fifo_in_local_memory.exchange(true))
+			{
+				const u32 system_mode = m_thread->driver_info ? +vm::_ref<RsxDriverInfo>(m_thread->driver_info).systemModeFlags : 0u;
+				rsx_log.warning("FIFO: no IO memory is mapped, fetching commands from local memory (offset 0x%x, system mode 0x%x)", address, system_mode);
+
+				if (gamedeck_trace::enabled())
+				{
+					gamedeck_trace::emit("rsx_fifo_translation",
+						"source=local\toffset=0x%08x\tea=0x%08x\tsystem_mode=0x%08x\tlocal_mem_size=0x%08x",
+						address, rsx::constants::local_mem_base + address, system_mode, m_thread->local_mem_size);
+				}
+			}
+
+			return m_thread->fifo_offset_to_ea(address);
 		}
 
 		void FIFO_control::sync_get() const
@@ -46,7 +83,7 @@ namespace rsx
 			m_command_inc = ((m_cmd & RSX_METHOD_NON_INCREMENT_CMD_MASK) == RSX_METHOD_NON_INCREMENT_CMD) ? 0 : 4;
 			m_remaining_commands = count;
 			m_internal_get = m_ctrl->get - 4;
-			m_args_ptr = m_iotable->get_addr(m_internal_get);
+			m_args_ptr = translate_address(m_internal_get);
 			m_command_reg = (m_cmd & 0xffff) + m_command_inc * (((m_cmd >> 18) - count) & 0x7ff) - m_command_inc;
 		}
 
@@ -99,7 +136,7 @@ namespace rsx
 
 				m_cache_addr = addr & -128;
 
-				const u32 addr1 = m_iotable->get_addr(m_cache_addr);
+				const u32 addr1 = translate_address(m_cache_addr);
 
 				if (addr1 == umax)
 				{
@@ -112,7 +149,7 @@ namespace rsx
 				if (0x100000 - (m_cache_addr & 0xfffff) < m_cache_size)
 				{
 					// Check if memory layout changes in the next 1MB page boundary
-					if ((addr1 >> 20) + 1 != (m_iotable->get_addr(m_cache_addr + 0x100000) >> 20))
+					if ((addr1 >> 20) + 1 != (translate_address(m_cache_addr + 0x100000) >> 20))
 					{
 						// Trim cache as needed if memory layout changes
 						m_cache_size = 0x100000 - (m_cache_addr & 0xfffff);
@@ -243,7 +280,7 @@ namespace rsx
 			// Return a raw pointer to contiguous memory
 			constexpr u32 _1M = 0x100000;
 			const u32 size = length_in_words * sizeof(u32);
-			const u32 from = m_iotable->get_addr(m_internal_get);
+			const u32 from = translate_address(m_internal_get);
 
 			for (u32 remaining = size, addr = m_internal_get, ptr = from; remaining > 0;)
 			{
@@ -255,7 +292,7 @@ namespace rsx
 				}
 
 				remaining -= available;
-				const u32 next_ptr = m_iotable->get_addr(next_block);
+				const u32 next_ptr = translate_address(next_block);
 				if (next_ptr != (ptr + available))
 				{
 					return { static_cast<const u32*>(vm::base(from)), (size - remaining) / sizeof(u32)};
@@ -351,7 +388,7 @@ namespace rsx
 			{
 				if (m_internal_get == m_memwatch_addr)
 				{
-					if (const u32 addr = m_iotable->get_addr(m_memwatch_addr); addr + 1)
+					if (const u32 addr = translate_address(m_memwatch_addr); addr + 1)
 					{
 						if (vm::read32(addr) == m_memwatch_cmp)
 						{
@@ -377,7 +414,7 @@ namespace rsx
 					return;
 				}
 
-				if (const u32 addr = m_iotable->get_addr(m_internal_get); addr + 1)
+				if (const u32 addr = translate_address(m_internal_get); addr + 1)
 				{
 					m_cmd = vm::read32(addr);
 				}
@@ -465,7 +502,7 @@ namespace rsx
 			inc_get(true); // Wait for data block to become available
 
 			// Validate the args ptr if the command attempts to read from it
-			m_args_ptr = m_iotable->get_addr(m_internal_get);
+			m_args_ptr = translate_address(m_internal_get);
 			if (m_args_ptr == umax) [[unlikely]]
 			{
 				// Optional recovery
@@ -743,7 +780,7 @@ namespace rsx
 				// Optimize returning to another CALL
 				if ((ctrl->put & ~3) != fifo_ret_addr)
 				{
-					if (u32 addr = iomap_table.get_addr(fifo_ret_addr); addr != umax)
+					if (u32 addr = fifo_ctrl->translate_address(fifo_ret_addr); addr != umax)
 					{
 						const u32 cmd0 = vm::read32(addr);
 
@@ -832,7 +869,7 @@ namespace rsx
 
 								for (u32 i = 1; i < remaining && fifo_ctrl->get_pos() + i * 4 != (ctrl->put & ~3); i++)
 								{
-									replay_cmd.rsx_command = std::make_pair(0, vm::read32(iomap_table.get_addr(fifo_ctrl->get_pos()) + (i * 4)));
+									replay_cmd.rsx_command = std::make_pair(0, vm::read32(fifo_ctrl->translate_address(fifo_ctrl->get_pos()) + (i * 4)));
 
 									commands.push_back(replay_cmd);
 								}

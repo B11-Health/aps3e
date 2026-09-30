@@ -2,6 +2,7 @@
 #include "sys_rsx.h"
 
 #include "Emu/System.h"
+#include "Emu/GameDeckTrace.h"
 #include "Emu/Cell/PPUModule.h"
 #include "Emu/Cell/ErrorCodes.h"
 #include "Emu/Cell/timers.hpp"
@@ -259,6 +260,12 @@ error_code sys_rsx_context_allocate(cpu_thread& cpu, vm::ptr<u32> context_id, vm
 
 	const auto render = rsx::get_current_renderer();
 
+	if (gamedeck_trace::enabled())
+	{
+		gamedeck_trace::emit("rsx_context_allocate", "system_mode=0x%llx\tlocal_mem_size=0x%08x",
+			static_cast<unsigned long long>(system_mode), render->local_mem_size);
+	}
+
 	std::lock_guard lock(render->sys_rsx_mtx);
 
 	if (render->dma_address)
@@ -318,6 +325,7 @@ error_code sys_rsx_context_allocate(cpu_thread& cpu, vm::ptr<u32> context_id, vm
 	driverInfo.hardware_channel = 1; // * i think* this 1 for games, 0 for vsh
 
 	render->driver_info = vm::cast(*lpar_driver_info);
+	render->fifo_in_local_memory = false;
 
 	auto &dmaControl = *vm::_ptr<RsxDmaControl>(vm::cast(*lpar_dma_control));
 	dmaControl.get = 0;
@@ -559,6 +567,11 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 		const u64 get = static_cast<u32>(a3);
 		const u64 put = static_cast<u32>(a4);
 		const u64 get_put = put << 32 | get;
+
+		if (render->fifo_in_local_memory)
+		{
+			sys_rsx.warning("sys_rsx_context_attribute(): FIFO set up again while commands are fetched from local memory (get=0x%x, put=0x%x)", get, put);
+		}
 
 		std::lock_guard lock(render->sys_rsx_mtx);
 		set_rsx_dmactl(render, get_put);
